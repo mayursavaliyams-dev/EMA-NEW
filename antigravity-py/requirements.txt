@@ -1,0 +1,6 @@
+# Antigravity-Py — Python options selling bot
+fastapi
+uvicorn[standard]
+httpx
+numpy
+# optional (not required for paper run): redis, pandas, scipy, apscheduler

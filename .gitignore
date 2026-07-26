@@ -1,0 +1,35 @@
+# ---- SECRETS (never commit) ----
+token.json
+config.json
+trading-token.json
+.env
+*.token
+*credentials*
+
+# ---- logs ----
+*.log
+*.err
+run.out.log
+run.err.log
+boot-*.log
+
+# ---- python ----
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ---- data / state / caches (regenerable, large, or private) ----
+data/
+bt-data/
+*.csv
+*.csv.gz
+instruments.csv.gz
+dhan_scrip.csv
+
+# ---- node ----
+node_modules/
+
+# ---- scratch / os ----
+scratchpad/
+.DS_Store
+Thumbs.db

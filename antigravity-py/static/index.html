@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antigravity-Py · Options Selling Bot</title>
+<link rel="stylesheet" href="https://code.highcharts.com/css/stocktools/gui.css">
+<link rel="stylesheet" href="https://code.highcharts.com/css/annotations/popup.css">
+<script src="https://code.highcharts.com/stock/highstock.js"></script>
+<script src="https://code.highcharts.com/stock/indicators/indicators-all.js"></script>
+<script src="https://code.highcharts.com/stock/modules/drag-panes.js"></script>
+<script src="https://code.highcharts.com/stock/modules/annotations-advanced.js"></script>
+<script src="https://code.highcharts.com/stock/modules/full-screen.js"></script>
+<script src="https://code.highcharts.com/stock/modules/stock-tools.js"></script>
+<style>
+  :root{--bg:#0a0e17;--card:#141b2d;--bd:rgba(255,255,255,.08);--mut:#8892a6;--txt:#e8ecf4;
+        --buy:#00f5d4;--sell:#f72585;--warn:#ffd60a;--blue:#2962ff;--mono:'JetBrains Mono',monospace}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);font-family:'Segoe UI',sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--bd);
+         background:linear-gradient(180deg,#141b2d,#0a0e17);flex-wrap:wrap}
+  h1{font-size:15px;margin:0} .pill{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700}
+  .paper{background:rgba(255,214,10,.15);color:var(--warn)}
+  .sym-btn{background:var(--card);color:var(--mut);border:1px solid var(--bd);border-radius:6px;
+           padding:5px 12px;cursor:pointer;font-weight:700;font-size:12px}
+  .sym-btn.active{color:var(--buy);border-color:var(--buy)}
+  .metric{display:flex;flex-direction:column;font-family:var(--mono)}
+  .metric .l{font-size:9px;color:var(--mut);text-transform:uppercase} .metric .v{font-size:14px;font-weight:700}
+  .grid{display:grid;grid-template-columns:1.5fr 1fr;gap:8px;padding:8px;height:calc(58vh)}
+  .panel{background:var(--card);border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+  .ph{padding:6px 10px;font-size:12px;font-weight:700;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center}
+  #hc_index,#hc_opt{flex:1;min-height:0;width:100%}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+  th,td{padding:3px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,.04)}
+  th{color:var(--mut);font-size:9px;text-transform:uppercase}
+  .ce{color:var(--buy)} .pe{color:var(--sell)} .up{color:var(--buy)} .down{color:var(--sell)}
+  .strike{font-weight:700;background:rgba(255,255,255,.03)}
+  tr.atm td{background:rgba(255,214,10,.12)} td.itm{background:rgba(255,214,10,.05)}
+  .chainwrap{padding:8px;max-height:36vh;overflow:auto}
+  button.tg{background:var(--card);border:1px solid var(--buy);color:var(--buy);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px}
+  .posrow td{font-size:11px}
+  #chain tbody tr{cursor:pointer}
+  #chain tbody tr:hover td{background:rgba(41,98,255,.10)}
+  #chain tbody td:hover{outline:1px solid var(--warn)}
+  tr.sel-strike td{background:rgba(41,98,255,.18) !important}
+  #opt_panel{display:none;margin:8px}
+  #opt_panel.show{display:flex;flex-direction:column;height:42vh}
+  .hl-badge{font-family:var(--mono);font-size:11px;color:var(--mut)}
+  .hl-badge b.up{color:var(--buy)} .hl-badge b.down{color:var(--sell)}
+  /* timeframe selector (TradingView-style) */
+  .tf{display:flex;gap:2px}
+  .tf button{background:transparent;border:1px solid transparent;color:var(--mut);border-radius:4px;
+             padding:2px 7px;cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:700}
+  .tf button:hover{color:var(--txt)}
+  .tf button.on{background:rgba(41,98,255,.18);color:var(--buy);border-color:var(--buy)}
+  .ohlc{font-family:var(--mono);font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* dark theme for Highcharts stock-tools toolbar */
+  .highcharts-bindings-wrapper{background:var(--card)}
+  .highcharts-menu-wrapper,.highcharts-toolbar-wrapper{background:var(--card)!important}
+  .highcharts-stocktools-toolbar li>.highcharts-menu-item-btn{filter:invert(.85) hue-rotate(140deg)}
+  .highcharts-popup{background:var(--card)!important;color:var(--txt)!important;border:1px solid var(--bd)!important}
+  .highcharts-popup input,.highcharts-popup select{background:var(--bg);color:var(--txt);border:1px solid var(--bd)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ Antigravity-Py</h1><span class="pill paper" id="mode">PAPER</span>
+  <span id="symbtns"></span>
+  <div class="metric"><span class="l">Spot</span><span class="v" id="m-spot">--</span></div>
+  <div class="metric"><span class="l">PCR</span><span class="v" id="m-pcr">--</span></div>
+  <div class="metric"><span class="l">Max Pain</span><span class="v warn" id="m-mp" style="color:var(--warn)">--</span></div>
+  <div class="metric"><span class="l">Support</span><span class="v" id="m-sup" style="color:var(--buy)">--</span></div>
+  <div class="metric"><span class="l">Resist</span><span class="v" id="m-res" style="color:var(--sell)">--</span></div>
+  <div class="metric"><span class="l">Engine</span><span class="v" id="m-eng">--</span></div>
+  <button class="tg" id="toggle" style="margin-left:auto">Toggle Engine</button>
+  <div class="metric"><span class="l">IST</span><span class="v" id="m-ist">--</span></div>
+</header>
+
+<div class="grid">
+  <div class="panel">
+    <div class="ph" style="gap:10px">
+      <span id="chart-title" style="flex:0 0 auto">Index</span>
+      <span class="ohlc" id="idx_ohlc" style="flex:1 1 auto"></span>
+      <span class="tf" id="tf-buttons" style="flex:0 0 auto"></span>
+    </div>
+    <div id="hc_index"></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><span>🎯 Strangle Engine</span><span id="eng-pnl" class="mono"></span></div>
+    <div style="padding:8px;overflow:auto" id="engine"></div>
+  </div>
+</div>
+
+<div class="panel" id="opt_panel">
+  <div class="ph" style="gap:10px">
+    <span id="opt_title" style="flex:0 0 auto">Option Chart</span>
+    <span class="hl-badge" id="opt_hl" style="flex:1 1 auto"></span>
+    <span class="tf" id="opt-tf" style="flex:0 0 auto"></span>
+    <span style="flex:0 0 auto">
+      <button class="tg" id="opt_ce">CE</button>
+      <button class="tg" id="opt_pe" style="border-color:var(--sell);color:var(--sell)">PE</button>
+      <button class="tg" id="opt_close" style="border-color:var(--mut);color:var(--mut)">✕</button>
+    </span>
+  </div>
+  <div id="hc_opt"></div>
+</div>
+
+<div class="panel" style="margin:8px">
+  <div class="ph"><span id="chain-title">Option Chain</span><span style="font-size:10px;color:var(--mut)">click a CE/PE price to chart that option's High/Low</span></div>
+  <div class="chainwrap"><table id="chain"></table></div>
+</div>
+
+<script>
+let SYM='NIFTY', IDX_TF='5', OPT_TF='5', selStrike=null, selOpt=null, lastSpot=0, idxChart=null, optChart=null;
+const $=id=>document.getElementById(id);
+async function j(u,o){const r=await fetch(u,o);return r.json();}
+const fmt=n=>{n=n||0;return n>=1e7?(n/1e7).toFixed(1)+'Cr':n>=1e5?(n/1e5).toFixed(1)+'L':n>=1e3?(n/1e3).toFixed(1)+'K':Math.round(n);};
+
+// ---- Highcharts (dark, IST) ----
+if(window.Highcharts){
+  Highcharts.setOptions({
+    time:{timezoneOffset:-330},   // IST = UTC+5:30
+    lang:{rangeSelectorZoom:''},
+    credits:{enabled:false},
+    accessibility:{enabled:false},
+  });
+}
+const HC_UP='#00f5d4', HC_DOWN='#f72585';
+// convert {time(sec),open,high,low,close} -> [ms,o,h,l,c]
+const toOHLC=a=>(a||[]).map(c=>[c.time*1000,c.open,c.high,c.low,c.close]);
+
+// light chart for the OPTION panel (High/Low plot-lines)
+function candleChart(container, data, plotLines){
+  if(!window.Highcharts) return null;
+  return Highcharts.stockChart(container,{
+    chart:{backgroundColor:'transparent',style:{fontFamily:'JetBrains Mono, monospace'},animation:false},
+    navigator:{enabled:false}, scrollbar:{enabled:false}, rangeSelector:{enabled:false},
+    xAxis:{crosshair:{color:'rgba(255,255,255,.15)',dashStyle:'ShortDot',width:1},
+           lineColor:'rgba(255,255,255,.08)',tickColor:'rgba(255,255,255,.08)',
+           labels:{style:{color:'#8892a6',fontSize:'10px'}},gridLineColor:'rgba(255,255,255,.03)',gridLineWidth:1},
+    yAxis:{opposite:true,gridLineColor:'rgba(255,255,255,.05)',
+           labels:{style:{color:'#8892a6',fontSize:'10px'},align:'left',x:4},
+           plotLines:plotLines||[]},
+    tooltip:{backgroundColor:'#141b2d',borderColor:'rgba(255,255,255,.15)',style:{color:'#e8ecf4'},
+             valueDecimals:2,shadow:false},
+    plotOptions:{candlestick:{color:HC_DOWN,upColor:HC_UP,lineColor:HC_DOWN,upLineColor:HC_UP}},
+    series:[{type:'candlestick',name:'Price',data:data}],
+  });
+}
+
+// ---- TradingView-style INDEX chart: timeframe, EMA overlays, crosshair, drawing tools, OHLC bar ----
+const TFS=[['1','1m'],['3','3m'],['5','5m'],['15','15m'],['30','30m'],['60','1h']];
+const tfLabel=v=>(TFS.find(x=>x[0]===v)||[,v+'m'])[1];
+function renderTF(){
+  $('tf-buttons').innerHTML=TFS.map(([v,l])=>`<button class="${v===IDX_TF?'on':''}" data-iv="${v}">${l}</button>`).join('');
+}
+function setIdxOHLC(o,h,l,c){
+  const up=c>=o, col=up?'var(--buy)':'var(--sell)', chg=o?((c-o)/o*100):0;
+  $('idx_ohlc').innerHTML=`<span style="color:${col}">O <b>${o}</b>  H <b>${h}</b>  L <b>${l}</b>  C <b>${c}</b>  ${chg>=0?'+':''}${chg.toFixed(2)}%</span>`;
+}
+function indexChart(container, data){
+  if(!window.Highcharts) return null;
+  return Highcharts.stockChart(container,{
+    chart:{backgroundColor:'transparent',style:{fontFamily:'JetBrains Mono, monospace'},animation:false},
+    navigator:{enabled:false}, scrollbar:{enabled:false}, rangeSelector:{enabled:false},
+    stockTools:{gui:{enabled:true,buttons:['indicators','separator','simpleShapes','lines','crookedLines',
+      'measure','advanced','toggleAnnotations','separator','verticalLabels','flags','separator',
+      'zoomChange','fullScreen','typeChange','separator','currentPriceIndicator']}},
+    xAxis:{crosshair:{color:'rgba(255,255,255,.18)',dashStyle:'ShortDot',width:1},
+           lineColor:'rgba(255,255,255,.08)',tickColor:'rgba(255,255,255,.08)',
+           labels:{style:{color:'#8892a6',fontSize:'10px'}},gridLineColor:'rgba(255,255,255,.03)',gridLineWidth:1},
+    yAxis:{opposite:true,gridLineColor:'rgba(255,255,255,.05)',
+           crosshair:{snap:false,label:{enabled:true,backgroundColor:'#2962ff',format:'{value:.1f}'}},
+           labels:{style:{color:'#8892a6',fontSize:'10px'},align:'left',x:4}},
+    tooltip:{shared:true,split:false,formatter:function(){
+        const cp=(this.points||[]).find(p=>p.point && p.point.open!==undefined);
+        if(cp){const pt=cp.point; setIdxOHLC(pt.open,pt.high,pt.low,pt.close);}
+        return false;   // no floating box — OHLC shows in the header bar (TradingView-style)
+    }},
+    plotOptions:{candlestick:{color:HC_DOWN,upColor:HC_UP,lineColor:HC_DOWN,upLineColor:HC_UP}},
+    series:[
+      {type:'candlestick',id:'main',name:SYM,data:data},
+      {type:'ema',linkedTo:'main',params:{period:9},color:'#ffd60a',lineWidth:1,name:'EMA 9',marker:{enabled:false}},
+      {type:'ema',linkedTo:'main',params:{period:21},color:'#2962ff',lineWidth:1.2,name:'EMA 21',marker:{enabled:false}},
+    ],
+  });
+}
+
+async function loadIndexChart(){
+  const r=await j('/api/candles?symbol='+SYM+'&interval='+IDX_TF);
+  const data=toOHLC(r.candles);
+  $('chart-title').textContent=SYM+' · '+tfLabel(IDX_TF);
+  if(idxChart && idxChart.get && idxChart.get('main')) idxChart.get('main').setData(data,true);
+  else idxChart=indexChart('hc_index',data);
+  if(data.length){const d=data[data.length-1]; setIdxOHLC(d[1],d[2],d[3],d[4]);}
+}
+$('tf-buttons').addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  IDX_TF=b.dataset.iv; renderTF(); loadIndexChart();
+});
+
+// ---- Option Chart (one strike's own candles) ----
+async function selectOption(strike, opt){
+  selStrike=strike; selOpt=opt;
+  $('opt_panel').classList.add('show');
+  await refreshOptionChart();
+  document.querySelectorAll('#chain tbody tr').forEach(tr=>tr.classList.toggle('sel-strike', tr.dataset.strike==String(strike)));
+}
+function renderOptTF(){
+  $('opt-tf').innerHTML=TFS.map(([v,l])=>`<button class="${v===OPT_TF?'on':''}" data-iv="${v}">${l}</button>`).join('');
+}
+async function refreshOptionChart(){
+  if(selStrike==null) return;
+  const r=await j(`/api/option_candles?symbol=${SYM}&strike=${selStrike}&opt=${selOpt}&interval=${OPT_TF}`);
+  if(r.error) return;
+  const data=toOHLC(r.candles);
+  const plot=[];
+  if(r.day_high!=null) plot.push({value:r.day_high,color:HC_UP,width:1,dashStyle:'Dash',zIndex:5,label:{text:'High '+r.day_high,align:'right',style:{color:HC_UP,fontSize:'9px'}}});
+  if(r.day_low!=null)  plot.push({value:r.day_low,color:HC_DOWN,width:1,dashStyle:'Dash',zIndex:5,label:{text:'Low '+r.day_low,align:'right',style:{color:HC_DOWN,fontSize:'9px'}}});
+  // rebuild so plotLines refresh
+  if(optChart){ try{optChart.destroy();}catch(e){} optChart=null; }
+  optChart=candleChart('hc_opt',data,plot);
+  $('opt_title').textContent=`${r.symbol} ${r.strike} ${r.opt} · ${r.expiry} · ${tfLabel(OPT_TF)}`;
+  $('opt_hl').innerHTML=`LTP <b>${r.ltp??'--'}</b> · High <b class="up">${r.day_high??'--'}</b> · Low <b class="down">${r.day_low??'--'}</b>`;
+}
+$('opt-tf').addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  OPT_TF=b.dataset.iv; renderOptTF(); refreshOptionChart();
+});
+$('opt_close').onclick=()=>{ selStrike=null; selOpt=null; $('opt_panel').classList.remove('show');
+  if(optChart){try{optChart.destroy();}catch(e){} optChart=null;}
+  document.querySelectorAll('#chain tbody tr').forEach(tr=>tr.classList.remove('sel-strike')); };
+$('opt_ce').onclick=()=>{ if(selStrike!=null) selectOption(selStrike,'CE'); };
+$('opt_pe').onclick=()=>{ if(selStrike!=null) selectOption(selStrike,'PE'); };
+
+async function loadAll(){
+  const h=await j('/api/health');
+  $('mode').textContent=(h.mode||'paper').toUpperCase();
+  $('m-eng').textContent=h.strangle_enabled?'ON':'OFF'; $('m-eng').style.color=h.strangle_enabled?'var(--buy)':'var(--sell)';
+  $('m-ist').textContent=h.ist?h.ist.split(' ')[1]:'--';
+
+  const a=await j('/api/options/analytics?symbol='+SYM);
+  if(!a.error){
+    $('m-spot').textContent=a.spot; $('m-pcr').textContent=a.pcr;
+    $('m-mp').textContent=a.max_pain; $('m-sup').textContent=a.oi_support; $('m-res').textContent=a.oi_resistance;
+  }
+  const s=await j('/api/strangle/status');
+  $('eng-pnl').innerHTML=`MTM <b class="${s.open_mtm>=0?'up':'down'}">₹${s.open_mtm}</b> · Day <b class="${s.realized_pnl_today>=0?'up':'down'}">₹${s.realized_pnl_today}</b>`;
+  let eh='';
+  if(s.open_positions && s.open_positions.length){
+    eh+=`<table><tr><th>Sym</th><th>Struct</th><th>Legs</th><th>Lots</th><th>Credit</th><th>PoP</th><th>MTM</th></tr>`+
+      s.open_positions.map(p=>`<tr class="posrow"><td>${p.symbol}</td><td>${p.structure}</td>
+        <td>${p.legs.map(l=>l.side[0]+l.strike+l.opt).join('<br>')}</td>
+        <td>${p.lots??'--'}</td><td>₹${p.credit}</td><td>${p.pop}%</td>
+        <td class="${p.mtm>=0?'up':'down'}">₹${p.mtm}</td></tr>`).join('')+`</table>`;
+  } else eh+=`<div style="color:var(--mut);font-size:12px;padding:6px">No open positions. Engine sells when market open + IV-percentile ≥ gate.</div>`;
+  if(s.recent_closed && s.recent_closed.length){
+    eh+=`<div style="margin-top:8px;font-size:11px;color:var(--mut)">Recent closed:</div><table>`+
+      s.recent_closed.slice().reverse().map(p=>`<tr><td>${p.symbol}</td><td>${p.exit_reason||''}</td><td class="${p.pnl>=0?'up':'down'}">₹${p.pnl}</td></tr>`).join('')+`</table>`;
+  }
+  $('engine').innerHTML=eh;
+
+  // option chain
+  const c=await j('/api/options/chain?symbol='+SYM);
+  if(c.strikes){
+    const spot=c.spot, atm=c.strikes.reduce((b,r)=>Math.abs(r.strike-spot)<Math.abs(b.strike-spot)?r:b);
+    const iv=l=>(l&&l.greeks&&l.greeks.iv!=null)?l.greeks.iv:'--';
+    lastSpot=spot;
+    const maxOi=Math.max(1,...c.strikes.flatMap(r=>[r.ce.oi||0,r.pe.oi||0]));
+    const oiCell=(r,side,itm)=>{
+      const oi=r[side].oi||0, t=oi/maxOi;
+      const rgb=side==='ce'?'0,245,212':'247,37,133';
+      return `<td class="${itm}" data-side="${side==='ce'?'CE':'PE'}" `+
+             `style="background:rgba(${rgb},${(t*0.45).toFixed(2)})" title="OI ${oi.toLocaleString()}">${fmt(oi)}</td>`;
+    };
+    const pcc=(l,it,side)=> l?`<td class="${l.pct>=0?'up':'down'} ${it}" data-side="${side}">${l.pct>0?'+':''}${l.pct??0}%</td>`:`<td data-side="${side}">--</td>`;
+    $('chain').innerHTML=`<thead><tr>
+      <th colspan=5 class=ce>CALLS</th><th>STRIKE</th><th colspan=5 class=pe>PUTS</th></tr>
+      <tr><th>OI 🔥</th><th>Vol</th><th>IV</th><th>LTP</th><th>Chg%</th><th></th><th>Chg%</th><th>LTP</th><th>IV</th><th>Vol</th><th>OI 🔥</th></tr></thead>`+
+      '<tbody>'+c.strikes.map(r=>{
+        const ceItm=r.strike<spot?'itm':'', peItm=r.strike>spot?'itm':'';
+        const sel=(selStrike!=null && r.strike===selStrike)?'sel-strike':'';
+        return `<tr class="${r.strike===atm.strike?'atm':''} ${sel}" data-strike="${r.strike}">
+          ${oiCell(r,'ce',ceItm)}<td class="${ceItm}" data-side="CE">${fmt(r.ce.volume)}</td><td class="${ceItm}" data-side="CE">${iv(r.ce)}</td>
+          <td class="ce ${ceItm}" data-side="CE">${r.ce.ltp}</td>${pcc(r.ce,ceItm,'CE')}
+          <td class="strike">${r.strike}</td>
+          ${pcc(r.pe,peItm,'PE')}<td class="pe ${peItm}" data-side="PE">${r.pe.ltp}</td><td class="${peItm}" data-side="PE">${iv(r.pe)}</td>
+          <td class="${peItm}" data-side="PE">${fmt(r.pe.volume)}</td>${oiCell(r,'pe',peItm)}</tr>`;
+      }).join('')+'</tbody>';
+  }
+  if(selStrike!=null) refreshOptionChart();
+}
+
+// ANY cell in a strike row opens that strike's chart.
+$('chain').addEventListener('click', e=>{
+  const td=e.target.closest('td'); if(!td) return;
+  const tr=td.closest('tr'); if(!tr || !tr.dataset.strike) return;
+  const strike=parseFloat(tr.dataset.strike);
+  const side=td.dataset.side || (strike>=lastSpot ? 'CE' : 'PE');
+  selectOption(strike, side);
+});
+
+function setSym(s){ SYM=s; selStrike=null; selOpt=null; $('opt_panel').classList.remove('show');
+  if(optChart){try{optChart.destroy();}catch(e){} optChart=null;}
+  if(idxChart){try{idxChart.destroy();}catch(e){} idxChart=null;}   // rebuild with new symbol name
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.s===s)); loadIndexChart(); loadAll(); }
+$('symbtns').innerHTML=['NIFTY','BANKNIFTY','SENSEX'].map(s=>`<button class="sym-btn ${s==='NIFTY'?'active':''}" data-s="${s}" onclick="setSym('${s}')">${s}</button>`).join(' ');
+$('toggle').onclick=async()=>{const h=await j('/api/health');await j('/api/strangle/enable?on='+(!h.strangle_enabled),{method:'POST'});loadAll();};
+
+renderTF(); renderOptTF(); loadIndexChart(); loadAll();
+setInterval(loadAll,5000); setInterval(loadIndexChart,20000);
+</script>
+</body>
+</html>

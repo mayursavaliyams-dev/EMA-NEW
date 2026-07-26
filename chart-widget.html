@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reusable Candlestick + EMA Chart</title>
+
+<!-- ✅ 1) Chart library (TradingView Lightweight Charts — free, open source) -->
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+
+<style>
+  body { margin:0; background:#0a0e17; color:#e8ecf4; font-family:'Segoe UI',sans-serif; }
+  .wrap { max-width:1200px; margin:20px auto; padding:0 16px; }
+  h2 { font-weight:600; }
+  #chart { width:100%; height:520px; border:1px solid rgba(255,255,255,.08); border-radius:10px; }
+  .controls { margin:10px 0; }
+  button { background:#141b2d; color:#e8ecf4; border:1px solid rgba(255,255,255,.12);
+           padding:7px 14px; border-radius:6px; cursor:pointer; margin-right:6px; }
+  button:hover { background:#1a2340; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h2>📈 Candlestick + EMA Chart (reusable widget)</h2>
+  <div class="controls">
+    <button onclick="loadSampleData()">Load Sample Data</button>
+    <button onclick="loadFromProxy()">Load Real NIFTY (needs server.py on :8765)</button>
+  </div>
+
+  <!-- ✅ 2) Chart container -->
+  <div id="chart"></div>
+</div>
+
+<script>
+// ============================================================
+//  REUSABLE CHART CODE — copy this whole <script> into your bot
+// ============================================================
+
+// ---- create the chart ----
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+    layout: { background: { color: '#0a0e17' }, textColor: '#8892a6', fontSize: 11 },
+    grid: {
+        vertLines: { color: 'rgba(255,255,255,0.04)' },
+        horzLines: { color: 'rgba(255,255,255,0.04)' }
+    },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.06)' },
+    timeScale: { borderColor: 'rgba(255,255,255,0.06)', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+});
+
+// ---- candlestick series ----
+const candleSeries = chart.addCandlestickSeries({
+    upColor: '#00f5d4', downColor: '#f72585',
+    borderUpColor: '#00f5d4', borderDownColor: '#f72585',
+    wickUpColor: '#00f5d4', wickDownColor: '#f72585',
+});
+
+// ---- EMA line series (add as many as you want) ----
+const ema9  = chart.addLineSeries({ color: '#00f5d4', lineWidth: 1.5, title: 'EMA 9'  });
+const ema21 = chart.addLineSeries({ color: '#7b61ff', lineWidth: 1.5, title: 'EMA 21' });
+const ema50 = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2,   title: 'EMA 50' });
+
+// ---- EMA calculator (standard formula) ----
+function calcEMA(candles, period) {
+    if (candles.length < period) return [];
+    const k = 2 / (period + 1);
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += candles[i].close;
+    let ema = sum / period;
+    const out = [{ time: candles[period - 1].time, value: +ema.toFixed(2) }];
+    for (let i = period; i < candles.length; i++) {
+        ema = (candles[i].close - ema) * k + ema;
+        out.push({ time: candles[i].time, value: +ema.toFixed(2) });
+    }
+    return out;
+}
+
+// ---- 👉 MAIN: feed your candles here ----
+// candles = [{ time:<epoch seconds>, open, high, low, close }, ... ] ascending
+function setCandles(candles) {
+    candleSeries.setData(candles);
+    ema9.setData(calcEMA(candles, 9));
+    ema21.setData(calcEMA(candles, 21));
+    ema50.setData(calcEMA(candles, 50));
+    chart.timeScale().fitContent();
+}
+
+// ---- responsive resize ----
+new ResizeObserver(es => {
+    for (const e of es) chart.applyOptions({ width: e.contentRect.width });
+}).observe(document.getElementById('chart'));
+
+// ============================================================
+//  DEMO HELPERS (delete these in your real bot)
+// ============================================================
+function loadSampleData() {
+    const candles = [];
+    let t = Math.floor(Date.now()/1000) - 200*300, p = 24000;
+    for (let i = 0; i < 200; i++) {
+        const o = p, c = o + (Math.random()-0.5)*40;
+        candles.push({ time: t, open:+o.toFixed(2), high:+(Math.max(o,c)+Math.random()*15).toFixed(2),
+                       low:+(Math.min(o,c)-Math.random()*15).toFixed(2), close:+c.toFixed(2) });
+        p = c; t += 300;
+    }
+    setCandles(candles);
+}
+
+// Pull real data from THIS project's proxy (server.py must be running on :8765)
+async function loadFromProxy() {
+    try {
+        const r = await fetch('http://localhost:8765/api/intraday?symbol=NIFTY&unit=minutes&interval=5');
+        const j = await r.json();
+        if (j.status === 'ok') setCandles(j.candles);
+        else alert('Proxy says: ' + j.status);
+    } catch (e) { alert('Could not reach server.py on :8765 — ' + e.message); }
+}
+
+// show something on first open
+loadSampleData();
+</script>
+</body>
+</html>

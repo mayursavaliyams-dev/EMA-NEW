@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMA Strategy Dashboard | Smart Scalping System</title>
+    <meta name="description" content="Advanced EMA Level Trading Strategy Dashboard for NSE/BSE scalping with real-time signals">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header id="main-header">
+        <div class="header-left">
+            <div class="logo" id="logo">
+                <div class="logo-icon">
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                        <path d="M4 20L10 8L16 16L22 4" stroke="url(#grad1)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M4 24L10 14L16 20L22 10" stroke="url(#grad2)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+                        <defs>
+                            <linearGradient id="grad1" x1="4" y1="4" x2="22" y2="20">
+                                <stop stop-color="#00f5d4"/>
+                                <stop offset="1" stop-color="#7b61ff"/>
+                            </linearGradient>
+                            <linearGradient id="grad2" x1="4" y1="10" x2="22" y2="24">
+                                <stop stop-color="#f72585"/>
+                                <stop offset="1" stop-color="#ffd60a"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <span class="logo-title">EMA STRATEGY</span>
+                    <span class="logo-subtitle">Smart Scalping System</span>
+                </div>
+            </div>
+        </div>
+        <div class="header-center">
+            <div class="symbol-selector" id="symbol-selector">
+                <button class="symbol-btn active" data-symbol="NIFTY">NIFTY 50</button>
+                <button class="symbol-btn" data-symbol="SENSEX">SENSEX</button>
+                <button class="symbol-btn" data-symbol="BANKNIFTY">BANK NIFTY</button>
+                <button class="symbol-btn" data-symbol="RELIANCE">RELIANCE</button>
+                <button class="symbol-btn" data-symbol="TATASTEEL">TATA STEEL</button>
+            </div>
+        </div>
+        <div class="header-right">
+            <button class="at-switch" id="btn-autotrade-main" title="Auto-Trade: bot takes option trades automatically on signals (PAPER)">
+                <span class="at-dot"></span>
+                <span class="at-label">AUTO-TRADE</span>
+                <span class="at-state" id="at-state">OFF</span>
+            </button>
+            <div class="pcr-chip" id="pcr-chip" title="Click for option chain">
+                <span class="pcr-chip-label">PCR</span>
+                <span class="pcr-chip-val" id="pcr-chip-val">--</span>
+                <span class="pcr-chip-bias" id="pcr-chip-bias">--</span>
+                <span class="pcr-chip-caret">▾</span>
+            </div>
+            <div class="market-status" id="market-status">
+                <span class="status-dot live"></span>
+                <span class="status-text">MARKET OPEN</span>
+            </div>
+            <div class="time-display" id="time-display">--:--:--</div>
+        </div>
+
+        <!-- Option Chain dropdown (vertical) — opens from PCR chip -->
+        <div class="oc-panel" id="oc-panel" style="display:none;">
+            <div class="oc-head" id="oc-head">Option Chain</div>
+            <table class="oc-table">
+                <thead>
+                    <tr class="oc-grp">
+                        <th colspan="5" style="color:var(--buy-color)">🟢 CALLS</th>
+                        <th></th>
+                        <th colspan="5" style="color:var(--sell-color)">🔴 PUTS</th>
+                    </tr>
+                    <tr>
+                        <th>OI</th><th>Vol</th><th>IV</th><th>LTP</th><th>Chg%</th>
+                        <th>STRIKE</th>
+                        <th>Chg%</th><th>LTP</th><th>IV</th><th>Vol</th><th>OI</th>
+                    </tr>
+                </thead>
+                <tbody id="oc-body"></tbody>
+            </table>
+            <div class="oc-foot" id="oc-foot">PCR --</div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main id="main-content">
+        <!-- All-index live ticker -->
+        <div class="index-ticker" id="index-ticker"></div>
+
+        <!-- Top Stats Bar -->
+        <div class="stats-bar" id="stats-bar">
+            <div class="stat-card" id="stat-ltp">
+                <div class="stat-label">LTP</div>
+                <div class="stat-value" id="ltp-value">--</div>
+                <div class="stat-change positive" id="ltp-change">+0.00%</div>
+            </div>
+            <div class="stat-card" id="stat-ema9">
+                <div class="stat-label">EMA 9</div>
+                <div class="stat-value ema-9" id="ema9-value">--</div>
+                <div class="stat-distance" id="ema9-dist">-- pts</div>
+            </div>
+            <div class="stat-card" id="stat-ema21">
+                <div class="stat-label">EMA 21</div>
+                <div class="stat-value ema-21" id="ema21-value">--</div>
+                <div class="stat-distance" id="ema21-dist">-- pts</div>
+            </div>
+            <div class="stat-card" id="stat-ema50">
+                <div class="stat-label">EMA 50</div>
+                <div class="stat-value ema-50" id="ema50-value">--</div>
+                <div class="stat-distance" id="ema50-dist">-- pts</div>
+            </div>
+            <div class="stat-card" id="stat-ema100">
+                <div class="stat-label">EMA 100</div>
+                <div class="stat-value ema-100" id="ema100-value">--</div>
+                <div class="stat-distance" id="ema100-dist">-- pts</div>
+            </div>
+            <div class="stat-card" id="stat-ema200">
+                <div class="stat-label">EMA 200</div>
+                <div class="stat-value ema-200" id="ema200-value">--</div>
+                <div class="stat-distance" id="ema200-dist">-- pts</div>
+            </div>
+            <div class="stat-card signal-card" id="stat-signal">
+                <div class="stat-label">SIGNAL</div>
+                <div class="stat-value signal-text" id="signal-value">WAIT</div>
+                <div class="stat-strength" id="signal-strength">
+                    <span class="strength-dot"></span>
+                    <span class="strength-dot"></span>
+                    <span class="strength-dot"></span>
+                    <span class="strength-dot"></span>
+                    <span class="strength-dot"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chart and Panels -->
+        <div class="content-grid">
+            <!-- Chart Section -->
+            <div class="chart-section" id="chart-section">
+                <div class="chart-toolbar" id="chart-toolbar">
+                    <div class="timeframe-selector">
+                        <button class="tf-btn active" data-tf="1">1m</button>
+                        <button class="tf-btn" data-tf="3">3m</button>
+                        <button class="tf-btn" data-tf="5">5m</button>
+                        <button class="tf-btn" data-tf="15">15m</button>
+                        <button class="tf-btn" data-tf="30">30m</button>
+                    </div>
+                    <div class="chart-controls">
+                        <select id="strategy-select" class="strategy-select" title="Live strategy">
+                            <option value="inside_bar">📋 Inside-Bar</option>
+                            <option value="bollinger">🎯 Bollinger</option>
+                            <option value="supertrend">📈 Supertrend</option>
+                            <option value="orb">🚪 ORB</option>
+                        </select>
+                        <button class="ctrl-btn" id="btn-ema-toggle" title="Toggle EMAs">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 12L5 6L9 10L14 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            EMAs
+                        </button>
+                        <button class="ctrl-btn" id="btn-signals-toggle" title="Toggle Signals">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            Signals
+                        </button>
+                        <button class="ctrl-btn" id="btn-levels-toggle" title="Toggle Levels">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            Levels
+                        </button>
+                        <button class="ctrl-btn" id="btn-spike" title="3 PM Spike catcher (2:55-3:05) — ride the end-of-day move" style="border-color:var(--warn-color);color:var(--warn-color);">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 13L6 5l3 5 2-3 3 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            3PM Spike: OFF
+                        </button>
+                        <button class="ctrl-btn" id="btn-autofit" title="Auto-Fit: keep charts auto-adjusted to latest candles">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                            Auto-Fit: ON
+                        </button>
+                        <button class="ctrl-btn" id="btn-livearm" title="ARM real-money orders (requires trading token)" style="border-color:var(--sell-color);color:var(--sell-color);">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l5.5 3v4c0 3.2-2.3 5.4-5.5 6.5C4.8 13.9 2.5 11.7 2.5 8.5v-4L8 1.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                            LIVE: OFF
+                        </button>
+                        <button class="ctrl-btn" id="btn-autotrade" title="Auto-Trade: take option trades automatically on signals">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="4" width="12" height="8" rx="2" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="8" r="1.3" fill="currentColor"/><circle cx="10" cy="8" r="1.3" fill="currentColor"/></svg>
+                            Auto-Trade: OFF
+                        </button>
+                        <button class="ctrl-btn" id="btn-refresh" title="Hard refresh — reload fresh data">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                <div class="chart-container" id="chart-container">
+                    <div class="mini-chart-wrap" style="flex:1;">
+                        <span class="chart-tag">📈 INDEX</span>
+                        <div id="chart-index" class="mini-chart"></div>
+                    </div>
+                    <div class="mini-chart-wrap" style="flex:1;">
+                        <span class="chart-tag call" id="tag-call">🟢 ATM CALL</span>
+                        <div id="chart-call" class="mini-chart"></div>
+                    </div>
+                    <div class="mini-chart-wrap" style="flex:1;">
+                        <span class="chart-tag put" id="tag-put">🔴 ATM PUT</span>
+                        <div id="chart-put" class="mini-chart"></div>
+                    </div>
+                </div>
+                <!-- Signal Overlay -->
+                <div class="signal-overlay" id="signal-overlay" style="display:none;">
+                    <div class="signal-popup">
+                        <div class="signal-icon"></div>
+                        <div class="signal-title"></div>
+                        <div class="signal-detail"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Sidebar -->
+            <div class="sidebar" id="sidebar">
+                <!-- Strategy Rules Panel -->
+                <div class="panel" id="strategy-panel">
+                    <div class="panel-header">
+                        <h3>📋 Strategy Rules</h3>
+                        <button class="panel-toggle" data-panel="strategy">−</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="rule-section">
+                            <h4 class="rule-title" style="color: var(--warn-color);">🎯 ENTRY TRIGGER</h4>
+                            <ul class="rule-list">
+                                <li class="rule-item" id="rule-ib">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Inside candle formed (entry only on inside bar)</span>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="rule-section">
+                            <h4 class="rule-title buy-title">🟢 BUY CONDITIONS</h4>
+                            <ul class="rule-list" id="buy-rules">
+                                <li class="rule-item" id="rule-b1">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">EMA 9 crosses ABOVE EMA 21</span>
+                                </li>
+                                <li class="rule-item" id="rule-b2">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Price above EMA 9 & EMA 21</span>
+                                </li>
+                                <li class="rule-item" id="rule-b3">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">EMA 9 > EMA 21 > EMA 50</span>
+                                </li>
+                                <li class="rule-item" id="rule-b4">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Price bouncing off EMA 21 support</span>
+                                </li>
+                                <li class="rule-item" id="rule-b5">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Candle closes above EMA 50</span>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="rule-section">
+                            <h4 class="rule-title sell-title">🔴 SELL CONDITIONS</h4>
+                            <ul class="rule-list" id="sell-rules">
+                                <li class="rule-item" id="rule-s1">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">EMA 9 crosses BELOW EMA 21</span>
+                                </li>
+                                <li class="rule-item" id="rule-s2">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Price below EMA 9 & EMA 21</span>
+                                </li>
+                                <li class="rule-item" id="rule-s3">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">EMA 9 < EMA 21 < EMA 50</span>
+                                </li>
+                                <li class="rule-item" id="rule-s4">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Rejected from EMA 21 resistance</span>
+                                </li>
+                                <li class="rule-item" id="rule-s5">
+                                    <span class="rule-check">○</span>
+                                    <span class="rule-text">Candle closes below EMA 50</span>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="rule-section">
+                            <h4 class="rule-title risk-title">⚡ RISK MANAGEMENT</h4>
+                            <div class="risk-params">
+                                <div class="risk-row">
+                                    <label>Fixed SL</label>
+                                    <span class="risk-val" id="sl-value">−30% of premium</span>
+                                </div>
+                                <div class="risk-row">
+                                    <label>Trail Profit</label>
+                                    <span class="risk-val" id="t1-value" style="color:var(--buy-color);">After +30%</span>
+                                </div>
+                                <div class="risk-row">
+                                    <label>Lock Gap</label>
+                                    <span class="risk-val" id="t2-value">20% below peak</span>
+                                </div>
+                                <div class="risk-row">
+                                    <label>Target</label>
+                                    <span class="risk-val" id="tsl-value">None (ride trend)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Active Signals Panel -->
+                <div class="panel" id="signals-panel">
+                    <div class="panel-header">
+                        <h3>🔔 Active Signals</h3>
+                        <button class="panel-toggle" data-panel="signals">−</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="signals-list" id="signals-list">
+                            <!-- Signals will be populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EMA Levels Panel -->
+                <div class="panel" id="levels-panel">
+                    <div class="panel-header">
+                        <h3>📊 EMA Levels</h3>
+                        <button class="panel-toggle" data-panel="levels">−</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="levels-table" id="levels-table">
+                            <div class="level-row header-row">
+                                <span>EMA</span>
+                                <span>Value</span>
+                                <span>Distance</span>
+                                <span>Status</span>
+                            </div>
+                            <!-- Filled by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Option Orders Panel -->
+                <div class="panel" id="option-orders-panel">
+                    <div class="panel-header">
+                        <h3>🎯 Option Orders <span style="font-size:11px;color:var(--warn-color);">PAPER</span></h3>
+                        <button class="panel-toggle" data-panel="options">−</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="option-orders-list" id="option-orders-list">
+                            <!-- Filled by JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Section: Trade Log -->
+        <div class="bottom-section" id="bottom-section">
+            <!-- Live Open Positions (separate, glanceable — active trades only) -->
+            <div class="panel trade-log-panel" id="positions-panel" style="margin-bottom:16px;">
+                <div class="panel-header">
+                    <h3>🟢 Live Open Positions <span id="pos-count" style="font-size:11px;color:var(--text-muted);"></span></h3>
+                    <div class="log-controls">
+                        <span id="pos-net" style="font-family:var(--font-mono,monospace);font-weight:700;"></span>
+                    </div>
+                </div>
+                <div class="table-wrap" style="overflow-x:auto;">
+                    <table class="trade-table" id="positions-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>Time</th><th>Option</th><th>Entry</th>
+                                <th>Target +13</th><th>SL −8</th><th>LTP</th><th>Peak</th>
+                                <th>P&amp;L ₹</th><th>Progress</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="panel trade-log-panel" id="trade-log-panel">
+                <div class="panel-header">
+                    <h3>📜 Trade History & Signals Log</h3>
+                    <div class="log-controls">
+                        <button class="log-btn active" data-filter="all">All</button>
+                        <button class="log-btn" data-filter="buy">Buy</button>
+                        <button class="log-btn" data-filter="sell">Sell</button>
+                        <button class="log-btn" data-filter="active">Active</button>
+                        <button class="clear-btn" id="clear-log">Clear</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <!-- P&L Summary -->
+                    <div class="pnl-summary" id="pnl-summary">
+                        <div class="pnl-card">
+                            <span class="pnl-label">Total Trades</span>
+                            <span class="pnl-val" id="pnl-total-trades">0</span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">Wins / Losses</span>
+                            <span class="pnl-val"><span id="pnl-wins" class="profit">0</span> / <span id="pnl-losses" class="loss">0</span></span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">Win Rate</span>
+                            <span class="pnl-val" id="pnl-winrate">0%</span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">Total Profit</span>
+                            <span class="pnl-val profit" id="pnl-profit">+0.00</span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">Total Loss</span>
+                            <span class="pnl-val loss" id="pnl-loss">-0.00</span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">🟢 Buy P&amp;L</span>
+                            <span class="pnl-val" id="pnl-buy">0.00</span>
+                        </div>
+                        <div class="pnl-card">
+                            <span class="pnl-label">🔴 Sell P&amp;L</span>
+                            <span class="pnl-val" id="pnl-sell">0.00</span>
+                        </div>
+                        <div class="pnl-card net">
+                            <span class="pnl-label">Net P&amp;L (₹)</span>
+                            <span class="pnl-val" id="pnl-net">0.00</span>
+                        </div>
+                    </div>
+                    <div class="trade-table-wrapper">
+                        <table class="trade-table" id="trade-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Time</th>
+                                    <th>Signal</th>
+                                    <th>Entry</th>
+                                    <th>Init SL</th>
+                                    <th>Trail SL</th>
+                                    <th>Peak</th>
+                                    <th>Status</th>
+                                    <th>P&L</th>
+                                    <th>Reason</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trade-log-body">
+                                <!-- Filled by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trade History (Full Details) -->
+            <div class="panel trade-log-panel" id="trade-history-panel" style="margin-top:16px;">
+                <div class="panel-header">
+                    <h3>📋 Trade History — Full Details</h3>
+                    <div class="log-controls">
+                        <span style="font-size:11px;color:var(--text-muted);" id="history-count">0 trades</span>
+                        <button class="clear-btn" id="export-history">Export CSV</button>
+                    </div>
+                </div>
+                <div class="panel-body">
+                    <div class="trade-table-wrapper">
+                        <table class="trade-table" id="trade-history-table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Symbol</th>
+                                    <th>TF</th>
+                                    <th>Side</th>
+                                    <th>Entry Time</th>
+                                    <th>Entry</th>
+                                    <th>Init SL</th>
+                                    <th>Risk (R)</th>
+                                    <th>Trail SL</th>
+                                    <th>Peak</th>
+                                    <th>LTP</th>
+                                    <th>Exit</th>
+                                    <th>Exit Time</th>
+                                    <th>Status</th>
+                                    <th>P&L (pts)</th>
+                                    <th>P&L (₹)</th>
+                                    <th>Signal</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="trade-history-body">
+                                <!-- Filled by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Audio for alerts -->
+    <audio id="alert-sound" preload="auto">
+        <source src="data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQ==" type="audio/wav">
+    </audio>
+
+    <script src="app.js"></script>
+</body>
+</html>
