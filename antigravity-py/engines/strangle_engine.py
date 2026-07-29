@@ -325,22 +325,30 @@ class StrangleEngine:
                 continue
 
             gross = 0.0
-            stale = False
+            stale = False           # any leg missing a quote -> MTM is approximate
+            stale_short = False     # a SHORT leg missing a quote -> risk is unmeasurable
             stop_hit = False
             for l in p["legs"]:
                 px = prices.get(l["key"])
-                if px is None or px <= 0:
+                leg_stale = px is None or px <= 0
+                if leg_stale:
                     # F5/F9: DO NOT pretend cur == entry (that silently disarmed the 2x stop
-                    # and made MTM look healthy). Mark it and withhold the decision.
+                    # and made MTM look healthy). Mark it and fall back for display only.
                     l["stale"] = True
                     stale = True
-                    px = l.get("cur", l["entry"])                   # last known, for display only
+                    px = l.get("cur", l["entry"])
                 else:
                     l["stale"] = False
                     l["cur"] = px
                 if l["side"] == "SELL":
                     gross += (l["entry"] - px) * l["qty"]
-                    if not stale and px >= l["entry"] * stopmult:
+                    if leg_stale:
+                        stale_short = True
+                    # Judge each short leg on ITS OWN quote. Using the loop-cumulative
+                    # flag meant a stale WING — deep OTM and the most likely leg to lose
+                    # its quote — disarmed the stop on a short that had genuinely blown
+                    # through the multiple.
+                    elif px >= l["entry"] * stopmult:
                         stop_hit = True
                 else:
                     gross += (px - l["entry"]) * l["qty"]
@@ -348,13 +356,21 @@ class StrangleEngine:
             p["stale"] = stale
 
             reason = None
-            if stale:
-                # cannot make a price-based decision on stale data; time-based exit still applies
+            if stop_hit:
+                # A risk exit is never delayed: the short leg's own price is live.
+                reason = f"LEG STOP ({stopmult:g}x)"
+            elif stale_short:
+                # Risk is unmeasurable — withhold price decisions, keep the time exit.
                 if nowmin >= sqmin:
                     reason = "EOD SQUARE-OFF (stale prices)"
-            elif stop_hit:
-                reason = f"LEG STOP ({stopmult:g}x)"
-            elif p["credit"] > 0 and gross >= p["credit"] * tp / 100:
+            elif stale:
+                # Only a wing is stale: MTM is approximate, so hold off on the PROFIT
+                # exit (it can wait) but the position is not at unmeasured risk.
+                if nowmin >= sqmin:
+                    reason = "EOD SQUARE-OFF (stale wing)"
+            elif tp > 0 and p["credit"] > 0 and gross >= p["credit"] * tp / 100:
+                # tp must be > 0: with takeProfitPct = 0 this used to read "gross >= 0"
+                # and closed the position the moment it was a rupee in profit.
                 reason = f"TAKE PROFIT ({tp:g}%)"
             elif nowmin >= sqmin:
                 reason = "EOD SQUARE-OFF"

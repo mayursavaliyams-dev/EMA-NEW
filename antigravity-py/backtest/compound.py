@@ -11,7 +11,6 @@ Usage:  python -m backtest.compound NIFTY condor ivgate60 [slip3]
 import sys
 from datetime import datetime
 
-import config
 import sizing
 from backtest import bt_strangle as bt
 
