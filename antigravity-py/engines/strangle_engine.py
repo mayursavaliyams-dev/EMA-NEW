@@ -23,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 import config
 import charges as ch
 from greeks import greeks, breakeven_pop_strangle
+from engines import committee
 
 STATE = os.path.join(config.DATA, "strangle_state.json")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -40,7 +41,7 @@ def _today():
 def _blank():
     return {"positions": [], "closed": [], "iv_hist": {}, "iv_day": {},
             "realized_pnl": 0.0, "equity": 0.0, "equity_peak": 0.0, "day": None, "seq": 0,
-            "halted": False, "halt_reason": ""}
+            "halted": False, "halt_reason": "", "decisions": []}
 
 
 def _load():
@@ -243,6 +244,29 @@ class StrangleEngine:
         credit = round(credit_ps * qty, 1)
         max_loss = round(_max_loss_per_lot(structure, credit_ps, ce, pe, cw, pw, lot) * lots)
 
+        # ---- DECISION COMMITTEE (Opus-5: agents debate -> score -> verdict) ----
+        acct_val = _num("ACCOUNT_CAPITAL") + s.get("equity", 0)
+        verdict = committee.evaluate({
+            "ivp": ivp, "gate": _num("ivLowPct"), "structure": structure,
+            "dte": _dte(expiry, today), "min_dte": min_dte, "lots": lots,
+            "credit": credit, "max_loss": max_loss,
+            "realized": s.get("realized_pnl", 0), "cap": cap,
+            "account_value": acct_val,
+            "peak": max(s.get("equity_peak", acct_val), acct_val),
+            "max_dd_pct": _num("MAX_DRAWDOWN_PCT"),
+        })
+        s.setdefault("decisions", []).append({
+            "time": now_ist().isoformat(timespec="seconds"), "symbol": symbol,
+            "structure": structure, "ivp": ivp, "credit": credit, "max_loss": max_loss,
+            "verdict": verdict["verdict"], "score": verdict["score"], "checks": verdict["checks"],
+        })
+        s["decisions"] = s["decisions"][-100:]
+        if verdict["verdict"] != "APPROVE":
+            _save(s)
+            nos = [c["agent"] for c in verdict["checks"] if c["vote"] == "NO"]
+            return {"skipped": f"committee REJECT (score {verdict['score']}, failed: {', '.join(nos) or 'score'})",
+                    "verdict": verdict}
+
         for l in legs:
             self.c.place_order(l["key"], l["side"], l["qty"])
         pop = breakeven_pop_strangle(spot, ce["strike"], pe["strike"],
@@ -252,6 +276,7 @@ class StrangleEngine:
         pos = {"id": s["seq"], "symbol": symbol, "expiry": expiry, "dte": _dte(expiry, today),
                "structure": structure, "spot_at_entry": spot, "legs": legs, "credit": round(credit, 1),
                "iv_pct": ivp, "pop": pop, "qty": qty, "lots": lots, "max_loss": max_loss,
+               "committee_score": verdict["score"],
                "status": "OPEN", "stale": False,
                "entry_time": now_ist().isoformat(timespec="seconds"), "mtm": 0.0}
         s["positions"].append(pos)
@@ -375,6 +400,15 @@ class StrangleEngine:
         _save(s)
         return {"halted": False}
 
+    def decisions_log(self):
+        """Full committee verdict ledger — Opus-5 'every idea challenged' audit trail."""
+        s = _load()
+        d = s.get("decisions", [])
+        appr = sum(1 for x in d if x["verdict"] == "APPROVE")
+        return {"count": len(d), "approved": appr, "rejected": len(d) - appr,
+                "approval_rate": round(appr / len(d) * 100, 1) if d else 0,
+                "decisions": d[::-1]}
+
     def status(self):
         s = _load()
         open_mtm = sum(p.get("mtm", 0) for p in s["positions"])
@@ -393,6 +427,7 @@ class StrangleEngine:
             "iv_history_days": {k: len(v) for k, v in s.get("iv_hist", {}).items()},
             "closed_count": len(s["closed"]),
             "recent_closed": s["closed"][-10:],
+            "recent_decisions": s.get("decisions", [])[-8:],
             # real-engine risk view
             "sizing_mode": config.cfg("SIZING_MODE"),
             "account_capital": _num("ACCOUNT_CAPITAL"),
@@ -403,3 +438,51 @@ class StrangleEngine:
             "open_max_loss": sum(p.get("max_loss", 0) for p in s["positions"]),
             "ist": now_ist().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    def trades(self):
+        """Full closed-trade ledger + P&L analytics, with CHARGES explicitly separated
+        (gross = P&L before costs, charges = round-trip fees, net = what actually landed)."""
+        s = _load()
+        closed = s.get("closed", [])
+        rows = []
+        for p in closed:
+            net = p.get("pnl", 0)                        # already net of charges
+            charges = p.get("charges", 0)
+            gross = round(net + charges, 1)              # P&L before costs
+            rows.append({
+                "id": p.get("id"), "symbol": p.get("symbol"), "structure": p.get("structure"),
+                "lots": p.get("lots"), "qty": p.get("qty"),
+                "entry_time": p.get("entry_time"), "exit_time": p.get("exit_time"),
+                "expiry": p.get("expiry"), "iv_pct": p.get("iv_pct"), "pop": p.get("pop"),
+                "credit": p.get("credit"), "exit_reason": p.get("exit_reason"),
+                "legs": [f"{l['side'][0]}{l['strike']}{l['opt']}" for l in p.get("legs", [])],
+                "gross": gross, "charges": charges, "net": net,
+            })
+        wins = [r for r in rows if r["net"] > 0]
+        losses = [r for r in rows if r["net"] < 0]
+        gross_sum = round(sum(r["gross"] for r in rows), 1)
+        charges_sum = round(sum(r["charges"] for r in rows), 1)
+        net_sum = round(sum(r["net"] for r in rows), 1)
+        gp = sum(r["net"] for r in wins)
+        gl = sum(r["net"] for r in losses)
+        # equity curve (cumulative net)
+        cum = 0.0
+        curve = []
+        for r in rows:
+            cum = round(cum + r["net"], 1)
+            curve.append({"t": r["exit_time"], "equity": cum})
+        summary = {
+            "count": len(rows),
+            "wins": len(wins), "losses": len(losses),
+            "win_rate": round(len(wins) / len(rows) * 100, 1) if rows else 0,
+            "gross": gross_sum, "charges": charges_sum, "net": net_sum,
+            "charges_pct_of_gross": round(charges_sum / gross_sum * 100, 1) if gross_sum else 0,
+            "profit_factor": round(gp / abs(gl), 2) if gl else (999.0 if gp else 0),
+            "avg_win": round(gp / len(wins)) if wins else 0,
+            "avg_loss": round(gl / len(losses)) if losses else 0,
+            "best": max((r["net"] for r in rows), default=0),
+            "worst": min((r["net"] for r in rows), default=0),
+            "realized_today": s.get("realized_pnl", 0),
+            "equity_cumulative": s.get("equity", 0),
+        }
+        return {"summary": summary, "trades": rows[::-1], "equity_curve": curve}

@@ -82,6 +82,18 @@ def strangle_enable(on: bool = True):
     return {"status": "ok", "STRANGLE_ENGINE_ENABLED": bool(on)}
 
 
+@app.get("/api/strangle/trades")
+def strangle_trades():
+    """Full closed-trade ledger + P&L analytics (gross / charges / net)."""
+    return engine.trades()
+
+
+@app.get("/api/committee/decisions")
+def committee_decisions():
+    """Decision-committee verdict ledger (Opus-5 debate -> score -> approve/reject)."""
+    return engine.decisions_log()
+
+
 @app.post("/api/strangle/resume")
 def strangle_resume():
     """Clear a HALT (kill-switch fired, or state file was quarantined).
