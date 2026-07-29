@@ -8,6 +8,11 @@ import os
 import json
 import tempfile
 
+# Push EOD square-off past midnight so the test is TIME-INDEPENDENT: otherwise a run
+# after 15:15 IST has EOD flatten the book before the risk gates are reached, and the
+# test reports a failure that is really just the clock.
+os.environ["squareOffIST"] = "23:59"
+
 import config
 from engines import strangle_engine as E
 

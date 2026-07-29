@@ -133,10 +133,20 @@
 
 <div id="tab-analysis" style="display:none">
   <div class="cards" id="an-cards"></div>
+
+  <div class="ph" style="padding:6px 14px;border:none"><span>🛡️ Risk Health — capital defended first</span></div>
+  <div class="cards" id="an-risk" style="padding-top:0"></div>
+
+  <div class="ph" style="padding:10px 14px 4px;border:none"><span>🟢 Open Positions (live MTM)</span></div>
+  <div class="tbl-wrap" id="an-open"></div>
+
   <div class="panel" style="margin:8px 12px">
     <div class="ph"><span id="an-eq-title">Equity Curve (cumulative net P&amp;L)</span></div>
     <div id="an_equity" style="height:26vh"></div>
   </div>
+
+  <div class="ph" style="padding:10px 14px 4px;border:none"><span>🎯 Exit-Rule Breakdown — which rule actually earns</span></div>
+  <div class="tbl-wrap" id="an-exit"></div>
   <div class="ph" style="padding:6px 14px;border:none"><span>Closed Trades — full details (charges counted)</span></div>
   <div class="tbl-wrap"><table id="trades-tbl"></table></div>
 
@@ -358,15 +368,52 @@ async function renderAnalysis(){
   const s=d.summary||{};
   const sign=v=>v>0?'up':v<0?'down':'';
   $('an-cards').innerHTML=[
-    ['Net P&L', `<span class="${sign(s.net)}">${rs(s.net)}</span>`, 'after charges'],
-    ['Gross P&L', rs(s.gross), 'before charges'],
-    ['Total Charges', `<span class="down">${rs(-Math.abs(s.charges))}</span>`, `${s.charges_pct_of_gross||0}% of gross`],
+    ['Total P&L', `<span class="${sign(s.total_pnl)}">${rs(s.total_pnl)}</span>`, `closed ${rs(s.net)} + open ${rs(s.open_mtm)}`],
+    ['Realised (net)', `<span class="${sign(s.net)}">${rs(s.net)}</span>`, 'after charges'],
+    ['Open MTM', `<span class="${sign(s.open_mtm)}">${rs(s.open_mtm)}</span>`, `${s.open_count||0} position(s)`],
+    ['Total Charges', `<span class="down">${rs(-Math.abs(s.charges))}</span>`, `${s.charges_pct_of_gross||0}% of gross ${rs(s.gross)}`],
     ['Trades', s.count||0, `${s.wins||0}W / ${s.losses||0}L`],
     ['Win Rate', (s.win_rate||0)+'%', `PF ${s.profit_factor||0}`],
     ['Avg Win', `<span class="up">${rs(s.avg_win)}</span>`, `Best ${rs(s.best)}`],
     ['Avg Loss', `<span class="down">${rs(s.avg_loss)}</span>`, `Worst ${rs(s.worst)}`],
-    ['Equity', rs(s.equity_cumulative), `Today ${rs(s.realized_today)}`],
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('');
+
+  // risk health strip
+  const rk=d.risk||{};
+  const ddBar=Math.min(100,(rk.drawdown_pct||0)/(rk.max_drawdown_pct||20)*100);
+  const dayBar=Math.min(100,(rk.daily_used||0)/(rk.daily_cap||1)*100);
+  $('an-risk').innerHTML=`
+    <div class="kpi"><div class="l">Account Value</div><div class="v">${rs(rk.account_value)}</div><div class="s">peak ${rs(rk.account_peak)}</div></div>
+    <div class="kpi"><div class="l">Drawdown</div><div class="v ${rk.drawdown_pct>0?'down':''}">${rk.drawdown_pct||0}%</div>
+      <div style="background:rgba(255,255,255,.08);height:5px;border-radius:3px;margin-top:5px"><div style="width:${ddBar}%;height:100%;background:${ddBar>70?'var(--sell)':'var(--warn)'};border-radius:3px"></div></div>
+      <div class="s">halt at ${rk.max_drawdown_pct}%</div></div>
+    <div class="kpi"><div class="l">Daily Loss Used</div><div class="v">${rs(rk.daily_used)}</div>
+      <div style="background:rgba(255,255,255,.08);height:5px;border-radius:3px;margin-top:5px"><div style="width:${dayBar}%;height:100%;background:${dayBar>70?'var(--sell)':'var(--buy)'};border-radius:3px"></div></div>
+      <div class="s">room ${rs(rk.daily_room)} / cap ${rs(rk.daily_cap)}</div></div>
+    <div class="kpi"><div class="l">Open Risk</div><div class="v">${rs(rk.open_risk)}</div><div class="s">${rk.open_risk_pct||0}% of account</div></div>
+    <div class="kpi"><div class="l">Engine</div><div class="v ${rk.halted?'down':'up'}">${rk.halted?'HALTED':'ACTIVE'}</div><div class="s">${rk.halt_reason||'all risk gates clear'}</div></div>`;
+
+  // open positions (live)
+  const op=d.open_positions||[];
+  $('an-open').innerHTML = op.length ? `<table id="trades-tbl" style="width:100%"><thead><tr>
+      <th class="l">#</th><th class="l">Entered</th><th class="l">Sym</th><th class="l">Legs</th>
+      <th>Lots</th><th>Credit</th><th>IV%</th><th>PoP</th><th>Max loss</th><th>MTM</th></tr></thead><tbody>`+
+    op.map(p=>`<tr><td class="l">${p.id}</td><td class="l">${(p.entry_time||'').replace('T',' ').slice(5,16)}</td>
+      <td class="l">${p.symbol}${p.stale?' <span class="down" title="stale prices">⚠</span>':''}</td>
+      <td class="l" style="font-size:10px">${(p.legs||[]).join(' ')}</td>
+      <td>${p.lots}</td><td>${rs(p.credit)}</td><td>${p.iv_pct}</td><td>${p.pop}%</td>
+      <td class="down">${rs(-Math.abs(p.max_loss))}</td>
+      <td class="${p.mtm>=0?'up':'down'}" style="font-weight:700">${rs(p.mtm)}</td></tr>`).join('')+`</tbody></table>`
+    : `<div style="color:var(--mut);font-size:12px;padding:8px">No open positions.</div>`;
+
+  // exit-rule breakdown (which rule actually makes money)
+  const be=(d.by_exit||[]).sort((a,b)=>b.net-a.net);
+  $('an-exit').innerHTML = be.length ? `<table id="trades-tbl" style="width:100%"><thead><tr>
+      <th class="l">Exit rule</th><th>Trades</th><th>Win%</th><th>Avg</th><th>Net</th></tr></thead><tbody>`+
+    be.map(b=>`<tr><td class="l">${b.reason}</td><td>${b.n}</td><td>${b.win_rate}%</td>
+      <td class="${b.avg>=0?'up':'down'}">${rs(b.avg)}</td>
+      <td class="${b.net>=0?'up':'down'}" style="font-weight:700">${rs(b.net)}</td></tr>`).join('')+`</tbody></table>`
+    : `<div style="color:var(--mut);font-size:12px;padding:8px">No closed trades yet — this shows which exit rule (TP / stop / EOD) actually earns.</div>`;
 
   // equity curve
   const ec=(d.equity_curve||[]).map((p,i)=>[i+1,p.equity]);

@@ -364,8 +364,10 @@ class StrangleEngine:
         s["positions"] = [p for p in s["positions"] if p["status"] == "OPEN"]
 
         # F4: DAILY kill-switch — counts unrealised too, FLATTENS, then halts.
+        # Halt on breach even if the book is ALREADY flat: losses that closed themselves
+        # (stops/EOD) can blow the cap, and the halt must still be visible and sticky.
         total = s.get("realized_pnl", 0) + sum(p.get("mtm", 0) for p in s["positions"])
-        if cap > 0 and total <= -cap and s["positions"]:
+        if cap > 0 and total <= -cap and not s.get("halted"):
             for p in list(s["positions"]):
                 self._close(s, p, f"KILL-SWITCH (day P&L {total:.0f} <= -{cap:.0f})")
             s["positions"] = []
@@ -471,6 +473,33 @@ class StrangleEngine:
         for r in rows:
             cum = round(cum + r["net"], 1)
             curve.append({"t": r["exit_time"], "equity": cum})
+        # which EXIT RULE actually makes money (Opus-5 "review -> optimize" loop)
+        by_exit = {}
+        for r in rows:
+            k = (r["exit_reason"] or "?").split("(")[0].strip()
+            b = by_exit.setdefault(k, {"reason": k, "n": 0, "net": 0.0, "wins": 0})
+            b["n"] += 1
+            b["net"] = round(b["net"] + r["net"], 1)
+            b["wins"] += 1 if r["net"] > 0 else 0
+        for b in by_exit.values():
+            b["win_rate"] = round(b["wins"] / b["n"] * 100) if b["n"] else 0
+            b["avg"] = round(b["net"] / b["n"]) if b["n"] else 0
+
+        # OPEN positions count too — the tab used to read 0 while a live trade was running
+        open_rows = [{
+            "id": p.get("id"), "symbol": p.get("symbol"), "structure": p.get("structure"),
+            "lots": p.get("lots"), "credit": p.get("credit"), "iv_pct": p.get("iv_pct"),
+            "pop": p.get("pop"), "mtm": p.get("mtm", 0), "max_loss": p.get("max_loss"),
+            "entry_time": p.get("entry_time"), "expiry": p.get("expiry"),
+            "stale": p.get("stale", False),
+            "legs": [f"{l['side'][0]}{l['strike']}{l['opt']}" for l in p.get("legs", [])],
+        } for p in s.get("positions", [])]
+        open_mtm = round(sum(r["mtm"] for r in open_rows), 1)
+
+        acct_cap = _num("ACCOUNT_CAPITAL")
+        acct_val = round(acct_cap + s.get("equity", 0), 1)
+        peak = max(s.get("equity_peak", acct_val), acct_val)
+        cap = abs(_num("dailyLossCapRs"))
         summary = {
             "count": len(rows),
             "wins": len(wins), "losses": len(losses),
@@ -484,5 +513,19 @@ class StrangleEngine:
             "worst": min((r["net"] for r in rows), default=0),
             "realized_today": s.get("realized_pnl", 0),
             "equity_cumulative": s.get("equity", 0),
+            # live view
+            "open_count": len(open_rows), "open_mtm": open_mtm,
+            "total_pnl": round(net_sum + open_mtm, 1),          # closed + unrealised
         }
-        return {"summary": summary, "trades": rows[::-1], "equity_curve": curve}
+        risk = {
+            "account_value": acct_val, "account_peak": round(peak, 1),
+            "drawdown_pct": round((1 - acct_val / peak) * 100, 1) if peak else 0,
+            "max_drawdown_pct": _num("MAX_DRAWDOWN_PCT"),
+            "daily_cap": cap, "daily_used": abs(min(s.get("realized_pnl", 0), 0)),
+            "daily_room": round(cap + min(s.get("realized_pnl", 0), 0), 1),
+            "open_risk": sum(r["max_loss"] or 0 for r in open_rows),
+            "open_risk_pct": round(sum(r["max_loss"] or 0 for r in open_rows) / acct_val * 100, 1) if acct_val else 0,
+            "halted": s.get("halted", False), "halt_reason": s.get("halt_reason", ""),
+        }
+        return {"summary": summary, "trades": rows[::-1], "equity_curve": curve,
+                "open_positions": open_rows, "by_exit": list(by_exit.values()), "risk": risk}
