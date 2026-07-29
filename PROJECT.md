@@ -37,6 +37,24 @@ statistically unproven** (need ~72+ trades). The one element robust across every
 fold is **"sell 1.0% OTM NIFTY condors"** — the IV-gate itself is not robust. No crisis period
 (2020/2008) is in the data, and short-vol dies in crises. **This is why we are still on paper.**
 
+### The finding that overrides all of the above
+
+`py -m backtest.intraday_engine NIFTY` walks the **real 1-minute index path** (197 days,
+Sep-2025→Jun-2026) instead of one price per day, and reprices the position every minute:
+
+| model | trades | win | NET | PF | stops |
+|---|---|---|---|---|---|
+| DAILY (how every backtest here was run) | 43 | 65% | **+₹5,190** | 1.05 | 23 |
+| INTRADAY (1-minute path) | 43 | 26% | **−₹41,171** | 0.51 | 32 |
+
+The daily model overstates by **₹46,361 (+113%)** and misses **9 stop events**. The worst
+trades all stop at **09:15** — overnight gaps, which a close-to-close model cannot see.
+`… NIFTY sens` shows this is **not** an artefact of the vol-spike assumption: with IV frozen
+(leverage 0) the intraday result is still **−₹24,449**. It is the path and the stop timing.
+
+**Read this as: a profitable-looking daily backtest of a short-vol strategy is not evidence.
+Until a strategy survives at intraday resolution, its daily P&L is a modelling artefact.**
+
 ---
 
 ## 3. The real engine (`engines/strangle_engine.py`)
