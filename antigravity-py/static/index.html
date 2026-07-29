@@ -101,6 +101,7 @@
     <div class="ph" style="gap:10px">
       <span id="chart-title" style="flex:0 0 auto">Index</span>
       <span class="ohlc" id="idx_ohlc" style="flex:1 1 auto"></span>
+      <span class="tf" style="flex:0 0 auto"><button id="btn-st" title="Supertrend (10, 3)">ST</button></span>
       <span class="tf" id="tf-buttons" style="flex:0 0 auto"></span>
     </div>
     <div id="hc_index"></div>
@@ -159,6 +160,7 @@
 
 <script>
 let SYM='NIFTY', IDX_TF='5', OPT_TF='5', selStrike=null, selOpt=null, lastSpot=0, idxChart=null, optChart=null, anEqChart=null, TAB='trading';
+let SHOW_ST = localStorage.getItem('showST') !== '0';   // Supertrend on by default, remembered
 const $=id=>document.getElementById(id);
 async function j(u,o){const r=await fetch(u,o);return r.json();}
 const fmt=n=>{n=n||0;return n>=1e7?(n/1e7).toFixed(1)+'Cr':n>=1e5?(n/1e5).toFixed(1)+'L':n>=1e3?(n/1e3).toFixed(1)+'K':Math.round(n);};
@@ -207,6 +209,14 @@ function setIdxOHLC(o,h,l,c){
 }
 function indexChart(container, data){
   if(!window.Highcharts) return null;
+  // The indicator bundle is a CDN load; if it did not arrive, skip Supertrend
+  // rather than letting one missing series type kill the whole chart.
+  const hasST = !!(Highcharts.seriesTypes && Highcharts.seriesTypes.supertrend);
+  if(!hasST){ const b=$('btn-st'); if(b){ b.disabled=true; b.title='Supertrend module not loaded'; b.style.opacity=.4; } }
+  const extra = hasST ? [{type:'supertrend',id:'st',linkedTo:'main',params:{period:10,multiplier:3},
+       risingTrendColor:'#00f5d4',fallingTrendColor:'#f72585',lineWidth:2,
+       changeTrendLine:{styles:{lineColor:'#ffd60a',lineWidth:1,dashStyle:'Dash'}},
+       name:'Supertrend 10,3',visible:SHOW_ST,marker:{enabled:false}}] : [];
   return Highcharts.stockChart(container,{
     chart:{backgroundColor:'transparent',style:{fontFamily:'JetBrains Mono, monospace'},animation:false},
     navigator:{enabled:false}, scrollbar:{enabled:false}, rangeSelector:{enabled:false},
@@ -229,6 +239,9 @@ function indexChart(container, data){
       {type:'candlestick',id:'main',name:SYM,data:data},
       {type:'ema',linkedTo:'main',params:{period:9},color:'#ffd60a',lineWidth:1,name:'EMA 9',marker:{enabled:false}},
       {type:'ema',linkedTo:'main',params:{period:21},color:'#2962ff',lineWidth:1.2,name:'EMA 21',marker:{enabled:false}},
+      // Supertrend (ATR band, flips side with trend: teal below in an uptrend,
+      // pink above in a downtrend) — appended only if the indicator loaded.
+      ...extra,
     ],
   });
 }
@@ -245,6 +258,14 @@ $('tf-buttons').addEventListener('click', e=>{
   const b=e.target.closest('button'); if(!b) return;
   IDX_TF=b.dataset.iv; renderTF(); loadIndexChart();
 });
+function renderST(){ $('btn-st').classList.toggle('on', SHOW_ST); }
+$('btn-st').onclick=()=>{
+  SHOW_ST=!SHOW_ST;
+  localStorage.setItem('showST', SHOW_ST?'1':'0');
+  renderST();
+  const st=idxChart && idxChart.get && idxChart.get('st');
+  if(st) st.setVisible(SHOW_ST, true);
+};
 
 // ---- Option Chart (one strike's own candles) ----
 async function selectOption(strike, opt){
@@ -461,7 +482,7 @@ async function renderAnalysis(){
   }).join('');
 }
 
-renderTF(); renderOptTF(); loadIndexChart(); loadAll();
+renderTF(); renderOptTF(); renderST(); loadIndexChart(); loadAll();
 setInterval(()=>{ loadAll(); if(TAB==='analysis') renderAnalysis(); },5000);
 setInterval(()=>{ if(TAB==='trading') loadIndexChart(); },20000);
 </script>
