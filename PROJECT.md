@@ -99,7 +99,7 @@ never feeds the strangle engine.
 - **Stays current:** re-centred on spot every 3 min (WS unsub/sub diff); instrument master
   refreshed hourly; when spot nears the last listed strike, `/v2/option/contract` is pulled so
   strikes NSE opens intraday join the same day.
-- **Data:** WebSocket ticks (premium) + REST quotes every 60 s (OI/volume, and fallback price).
+- **Data:** WebSocket ticks (premium) + REST quotes every 30 s (OI/volume, and fallback price).
 - **Alerts:** premium ±20 % in 5 min, or OI ±25 % in 15 min (≥ 50 lots) → checked against
   NSE filings + Google News: `NEWS-MATCH` (news in the prior 60 min), `UNEXPLAINED`, or
   `NEWS-AFTER` (news arrived within 60 min after the move). All thresholds editable in the tab.

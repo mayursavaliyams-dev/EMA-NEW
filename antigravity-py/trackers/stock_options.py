@@ -14,7 +14,7 @@ How it works
                 last listed strike, that stock's LIVE contract list is pulled from
                 /v2/option/contract so strikes NSE opens intraday are picked up the same day.
 3. Data       — Upstox v3 WebSocket (ltpc) for tick-level premium; REST full quotes every
-                `trkQuotePollSec` for OI/volume (and as a fallback price source).
+                `trkQuotePollSec` (30 s) for OI/volume (and as a fallback price source).
 4. Detect     — premium move >= trkSpikePct within trkWindowMin  (UP or DOWN), or
                 OI change >= trkOiPct within trkOiWindowMin (and >= trkMinOiLots lots).
 5. Match      — on a spike, news for that stock (NSE filings + Google News) inside the last
@@ -57,7 +57,7 @@ SETTINGS = {
     "trkNewsLookbackMin": 60,   # news this far BEFORE the move counts as a match
     "trkNewsAfterMin": 60,      # keep re-checking UNEXPLAINED alerts this long
     "trkRebalanceMin": 3,       # re-centre ATM window / diff subscription
-    "trkQuotePollSec": 60,      # REST OI/volume poll
+    "trkQuotePollSec": 30,      # REST OI/volume poll (10 calls of 500 keys -> 20 calls/min)
     "trkAlwaysOn": False,       # True = run outside market hours too (testing)
 }
 for _k, _v in SETTINGS.items():
