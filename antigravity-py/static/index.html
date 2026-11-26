@@ -605,11 +605,12 @@ async function renderLadder(){
   $('trk-exp').innerHTML=ex.map(e=>`<option ${e===TRK_EXP?'selected':''}>${e}</option>`).join('');
   const rows=d.rows||[]; const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
   const atm=rows[0]?.atm, spot=rows[0]?.spot;
-  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">click a CE/PE price → chart · ● live tick · VWAP green = LTP above VWAP</span>`;
+  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">click a CE/PE price → chart · ● live tick · VWAP green = LTP above VWAP · H/L = at day high/low · hover OI → day OI range</span>`;
   const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="8">--</td>';
     const vw=r.vwap!=null?`<span class="${r.above_vwap?'vw-up':'vw-dn'}">${r.vwap}</span>`:'--';
-    const ltp=`<td class="ck ${side}" onclick="trkChart('${r.key}')">${r.live?'● ':''}${r.ltp??'--'}</td>`;
-    const c=[`<td>${nf(r.oi)}</td>`,`<td>${sg(r.oi_chg)}</td>`,`<td>${nf(r.volume)}</td>`,`<td>${pc(r.chg_pct)}</td>`,`<td>${vw}</td>`,`<td>${r.low??'--'}/${r.high??'--'}</td>`,`<td>${rngBar(r)}</td>`,ltp];
+    const hl=r.range_pos==null?'':r.range_pos>=98?' <b class="up" title="at day high">H</b>':r.range_pos<=2?' <b class="down" title="at day low">L</b>':'';
+    const ltp=`<td class="ck ${side}" onclick="trkChart('${r.key}')">${r.live?'● ':''}${r.ltp??'--'}${hl}</td>`;
+    const c=[`<td title="OI day low ${nf(r.oi_lo)} · high ${nf(r.oi_hi)}">${nf(r.oi)}</td>`,`<td>${sg(r.oi_chg)}</td>`,`<td>${nf(r.volume)}</td>`,`<td>${pc(r.chg_pct)}</td>`,`<td>${vw}</td>`,`<td>${r.low??'--'}/${r.high??'--'}</td>`,`<td>${rngBar(r)}</td>`,ltp];
     return side==='ce'?c.join(''):c.reverse().join(''); };
   $('trk-ladder').innerHTML=`<thead><tr><th>CE OI</th><th>OI chg</th><th>Vol</th><th>Chg%</th><th>VWAP</th><th>Low/High</th><th>Range</th><th>CE LTP</th><th>Strike</th>
     <th>PE LTP</th><th>Range</th><th>Low/High</th><th>VWAP</th><th>Chg%</th><th>Vol</th><th>OI chg</th><th>PE OI</th></tr></thead><tbody>`+
