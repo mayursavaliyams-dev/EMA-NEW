@@ -24,6 +24,7 @@ from trackers import providers as P
 
 TMP = tempfile.mkdtemp()
 T.ALERTS_PATH = os.path.join(TMP, "alerts.json")          # never touch real data
+T.TRENDS_PATH = os.path.join(TMP, "trends.json")
 SET = dict(T.SETTINGS, trkAlwaysOn=True)
 T.setting = lambda k: SET[k]
 IST = T.IST
@@ -105,10 +106,11 @@ class FakeNews:
                 if (since_ts is None or i["ts"] >= since_ts) and (until_ts is None or i["ts"] <= until_ts)]
 
 
-def make(provider=None):
+def make(provider=None, history=False, context=False):
     p = provider or FakeProvider()
     n = FakeNews()
-    t = T.StockOptionsTracker(None, n, detector=T.Detector(get=lambda k: SET[k]), providers={"upstox": p})
+    t = T.StockOptionsTracker(None, n, detector=T.Detector(get=lambda k: SET[k]), providers={"upstox": p},
+                              history=history, context=context)
     t.alerts.clear()
     t.choose_provider()
     t.u.build(p.load_rows())
@@ -124,7 +126,8 @@ def test_25000_allocation():
         per[m["symbol"]] = per.get(m["symbol"], 0) + 1
     check("218 stocks covered", len(per) == 218, f"({len(per)})")
     check("25,000 strikes tracked", len(t.sel) == 25000, f"({len(t.sel)})")
-    check("Upstox: 5,000 nearest-ATM streamed live", len(t.live_keys) == 5000 and p.sub == t.live_keys)
+    check("Upstox: 4,782 nearest-ATM strikes + 218 stocks = 5,000 streamed live",
+          len(t.live_keys) == 4782 and p.sub == t.live_keys | set(t.ukeys) and len(p.sub) == 5000)
     far = max(t.sel[k]["dist"] for k in t.live_keys)
     check("live subset = nearest strikes", all(t.sel[k]["dist"] >= far - 1e-12 for k in set(t.sel) - t.live_keys))
     check("front expiry only", {m["expiry"] for m in t.sel.values()} == {(datetime.now(IST) + timedelta(days=5)).strftime("%Y-%m-%d")})
@@ -132,7 +135,7 @@ def test_25000_allocation():
     check("window centred on ATM", strikes[0] <= 1300 <= strikes[-1], f"({strikes[0]}..{strikes[-1]})")
     t2, p2, _ = make(FakeProvider("dhan", 25000))
     t2.rebalance()
-    check("Dhan: all 25,000 streamed live", len(t2.live_keys) == 25000 == len(p2.sub))
+    check("Dhan: every tracked strike + 218 stocks live = 25,000", len(t2.live_keys) == len(t2.sel) == 24782 and len(p2.sub) == 25000)
     # broker lists fewer front-expiry strikes than the budget (Upstox ~12.6k) -> next expiry fills
     p3 = FakeProvider()
     p3.load_rows = lambda: rows(strikes=30)          # 218 x 30 x 2 = 13,080 legs per expiry
@@ -405,7 +408,7 @@ def test_speed():
     now = time.time()
     N = 200_000
     for i in range(N):
-        k = keys[i % 25000]
+        k = keys[i % len(keys)]
         t.on_data(k, {"ltp": 50 + rnd.random(), "oi": 10000 + i % 7, "volume": 1000 + i}, now + i * 0.005)
     dt = time.perf_counter() - t0
     check("throughput >= 20,000 updates/sec", N / dt >= 20000, f"({N / dt:,.0f}/s)")
@@ -416,11 +419,196 @@ def test_speed():
           f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
 
 
+# ---------------------------------------------------------------------------
+# multi-day history (NSE bhavcopy), all-time high/low, trends, IV, unusual, context
+# ---------------------------------------------------------------------------
+import gzip as _gz
+from trackers.history import History, FIELDS
+from datetime import date as _date
+
+
+def fake_hist(days):
+    """days: list of (date, rows[tok, sym, exp, strike, opt, high, low, close, prev, oi, choi, vol, undl])"""
+    cache = tempfile.mkdtemp()
+    for d, rws in days:
+        with _gz.open(os.path.join(cache, d.replace("-", "") + ".csv.gz"), "wt", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(FIELDS)
+            for (tok, sym, exp, k, opt, hi, lo, cl, pv, oi, choi, vol, undl) in rws:
+                w.writerow([tok, sym, exp, k, opt, lo, hi, lo, cl, pv, oi, choi, vol, undl])
+    return cache
+
+
+def test_history():
+    exp = (datetime.now(IST) + timedelta(days=20)).strftime("%Y-%m-%d")
+    today = datetime.now(IST).date()
+    ds = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in (6, 5, 4, 3, 2, 1)]
+    days = []
+    for i, d in enumerate(ds):         # CE: price up + OI up every day (long buildup), PE: price down + OI up (short buildup)
+        days.append((d, [("101", "ABC", exp, 100, "CE", 10 + i * 2, 8 + i, 9 + i * 2, 8 + i * 2, 1000 + i * 500, 500, 50, 1000 + i),
+                         ("102", "ABC", exp, 100, "PE", 20 - i, 15 - i, 16 - i, 17 - i, 2000 + i * 300, 300, 40, 1000 + i)]))
+    days[2][1][0] = ("101", "ABC", exp, 100, "CE", 99, 8, 9 + 4, 8 + 4, 2000, 500, 50, 1002)      # the all-time high day
+    h = History(days=30, cache=fake_hist(days), fetch=False).load(today)
+    c = h.contract("101")
+    check("ALL-TIME HIGH + date from bhavcopy", c["ath"] == 99 and c["ath_d"] == ds[2])
+    check("ALL-TIME LOW + listing date", c["atl"] == 8 and c["atl_d"] == ds[0] and c["listed"] == ds[0])
+    check("prev OI = last bhavcopy day (fills Upstox gap)", c["prev_oi"] == 1000 + 5 * 500)
+    row = [r for r in h.stock_table() if r["symbol"] == "ABC"][0]
+    check("multi-day: CE OI up 6 days in a row", row["ce_streak"] == 6)
+    check("persistent activity: CE long buildup / PE short buildup every day",
+          row["ce_run"] == "LB" and row["ce_run_days"] == 6 and row["pe_run"] == "SB" and row["pe_dom_days"] == 5)
+    sb = h.strike_build("ABC", 5)
+    check("strikes where OI was built over 5 days", sb[0]["oi_chg"] == 2500 and sb[0]["opt"] == "CE")
+    return h
+
+
+def test_history_in_tracker():
+    exp = (datetime.now(IST) + timedelta(days=20)).strftime("%Y-%m-%d")
+    today = datetime.now(IST).date()
+    ds = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in (2, 1)]
+    t, p, n = make()
+    t.rebalance()
+    k = next(k for k, m in t.sel.items() if m["symbol"] == "STK0" and m["opt"] == "CE" and m["strike"] == m["atm"])
+    tok = k.split("|", 1)[1]
+    days = [(d, [(tok, "STK0", exp, 1300, "CE", 40, 20, 30, 28, 100000, 1000, 5000, 1300)]) for d in ds]
+    t.hist = History(days=30, cache=fake_hist(days), fetch=False).load(today)
+    t.on_data(k, {"ltp": 45.0, "high": 46.0, "low": 30.0, "prev_close": 30.0, "oi": 150000, "volume": 260000})
+    t._drain_events()
+    r = [x for x in t.board("STK0") if x["key"] == k][0]
+    check("ladder: all-time high includes today's new high", r["ath"] == 46.0 and r["ath_d"] == "today" and r["atl"] == 20)
+    check("OI chg vs bhavcopy prev OI + live buildup label", r["oi_chg"] == 50000 and r["buildup"] == "LB")
+    check("Vol/OI ratio", r["vol_oi"] == 2.6)
+    kinds = {a["kind"] for a in t.alerts if a["symbol"] == "STK0"}
+    check("ATH-break alert + UNUSUAL (vol >= 2x OI) alert", {"ATH", "UNUSUAL"} <= kinds, str(kinds))
+    a = [x for x in t.alerts if x["kind"] == "ATH"][0]
+    check("alert carries reason + first-alert-of-day", "ALL-TIME HIGH" in a["reason"] and a["first_alert"]["time"])
+
+
+def test_trend():
+    eng = __import__("trackers.trend", fromlist=["TrendEngine"]).TrendEngine(lambda k: SET[k])
+    base = T.session_open_ts(time.time()) + 3600
+    bar = SET["trkTrendBarMin"] * 60
+    evs = []
+    px = [20, 19.5, 19, 18.6, 18.5, 18.4]                       # drift down, swing low 18.4
+    px += [19.2, 20.4, 21.8, 23.5, 25.0, 26.4, 27.5]             # one-sided rally, green candles
+    px += [27.0, 24.0, 21.0, 20.0, 19.5]                         # collapse
+    for i, p in enumerate(px):
+        t0 = base + i * bar
+        evs += eng.on_price("K", p * 0.99, t0 + 1, vwap=21.0)    # open
+        evs += eng.on_price("K", p, t0 + bar - 1, vwap=21.0)     # close (green when rising)
+    evs += eng.on_price("K", 19.0, base + len(px) * bar + 1, vwap=21.0)
+    st = [e for e in evs if e["phase"] == "START"]
+    en = [e for e in evs if e["phase"] == "END"]
+    check("TREND START detected (UP)", st and st[0]["trend"]["dir"] == "UP")
+    tr = st[0]["trend"]
+    check("trend 'started from here' = swing-low candle, confirmed later",
+          tr["origin"] <= 18.5 and tr["started_at"] < tr["confirmed_at"], f"(origin {tr['origin']} {tr['started_time']} → {tr['confirmed_time']})")
+    check("start reason explains EMA / VWAP / green candles / move",
+          all(x in tr["reason_start"] for x in ("EMA5", "VWAP", "green candles", "from the low")))
+    check("TREND END with reason, counts, one-sided %", en and en[0]["trend"]["reason_end"] and en[0]["trend"]["green"] >= 3
+          and en[0]["trend"]["one_sided_pct"] >= 50 and en[0]["trend"]["best_move_pct"] > 15,
+          f"({en and en[0]['trend']['reason_end']})")
+
+
+def test_trend_saved_and_alerted():
+    t, p, n = make()
+    t.rebalance()
+    k = next(k for k, m in t.sel.items() if m["symbol"] == "STK2" and m["strike"] == m["atm"] and m["opt"] == "CE")
+    base = T.session_open_ts(time.time()) + 3600
+    bar = SET["trkTrendBarMin"] * 60
+    px = [20, 19.5, 19, 18.6, 18.5, 18.4, 19.2, 20.4, 21.8, 23.5, 25.0, 26.4, 27.5, 27.0, 24.0, 21.0, 20.0, 19.5, 19]
+    for i, v in enumerate(px):
+        t.on_data(k, {"ltp": v * 0.99, "vwap": 21.0}, base + i * bar + 1)
+        t.on_data(k, {"ltp": v}, base + i * bar + bar - 1)
+    t._drain_events()
+    t._save_trends()
+    saved = json.load(open(T.TRENDS_PATH))
+    check("trend record saved to disk with start/end details",
+          saved and saved[-1]["symbol"] == "STK2" and saved[-1]["status"] == "ENDED"
+          and saved[-1]["started_time"] and saved[-1]["ended_time"] and saved[-1]["reason_end"])
+    ka = [a for a in t.alerts if a["symbol"] == "STK2" and a["kind"] in ("TREND", "TREND_END")]
+    check("TREND + TREND_END alerts with reasons", {a["kind"] for a in ka} == {"TREND", "TREND_END"}
+          and all(a["reason"] for a in ka))
+    check("alert remembers the first alert of the day", ka[-1]["first_alert"]["kind"] in ("TREND", "PRICE"))
+
+
+def test_iv_greeks_and_spike():
+    t, p, n = make()
+    t.rebalance()
+    k = next(k for k, m in t.sel.items() if m["symbol"] == "STK4" and m["strike"] == m["atm"] and m["opt"] == "CE")
+    now = time.time()
+    t.on_data(k, {"ltp": 30.0}, now)
+    t.compute_greeks(now)
+    g = t.greeks.get(k)
+    check("IV + greeks computed for live strikes", g and 5 < g["iv"] < 200 and 0 < g["delta"] < 1, str(g))
+    t.on_data(k, {"ltp": 60.0}, now + 60)
+    t.compute_greeks(now + 60)
+    t._drain_events()
+    check("IV spike alert", any(a["kind"] == "IV" and a["symbol"] == "STK4" for a in t.alerts))
+
+
+def test_depth_and_context():
+    d = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    depth = b"".join(struct.pack("<IIHHff", 100 * (i + 1), 50 * (i + 1), 3, 2, 10.0 - i * 0.05, 10.1 + i * 0.05) for i in range(5))
+    body = struct.pack("<BHBIfHIfIIIIIIffff", 8, 162, 2, 7, 10.1, 75, 1, 10.0, 1000, 300, 400, 5000, 5100, 4900, 9.5, 9.0, 10.5, 9.2)
+    f = dict(d.parse(body + depth))["NSE_FNO|7"]
+    check("Dhan depth: bid/ask + 5-level qty", f["bid"] == 10.0 and f["ask"] == 10.1 and f["depth_bid_qty"] == 1500)
+    t, p, n = make()
+    t.rebalance()
+    k = next(iter(t.live_keys))
+    t.on_data(k, {"ltp": 10.1, "bid": 10.0, "ask": 10.1, "tbq": 600, "tsq": 400})
+    r = [x for x in t.board(t.sel[k]["symbol"]) if x["key"] == k][0]
+    check("spread %, aggressor BUY, buy-pressure %", r["spread_pct"] == 1.0 and r["aggressor"] == "BUY" and r["buy_pct"] == 60)
+    from trackers.nse_context import NseContext
+    c = NseContext()
+    c.ban, c.ban_date = {"STK5"}, "27-NOV-2026"
+    c.mwpl = {"STK5": {"pct": 97.0, "chg": 2.0, "limit_next": "No Fresh Positions"},
+              "STK6": {"pct": 91.0, "chg": 4.5, "limit_next": "123"}}
+    c.events = {"STK6": [{"date": (datetime.now(IST) + timedelta(days=2)).strftime("%d-%b-%Y"), "purpose": "Financial Results", "desc": ""}]}
+    t.ctx = c
+    t.context_alerts()
+    kinds = {(a["symbol"], a["kind"]) for a in t.alerts}
+    check("BAN + MWPL>=90% context alerts", ("STK5", "BAN") in kinds and ("STK6", "MWPL") in kinds)
+    s6 = [x for x in t.summary() if x["symbol"] == "STK6"][0]
+    check("summary carries MWPL % + upcoming event", s6["mwpl_pct"] == 91.0 and s6["event"]["days"] == 2)
+
+
+def test_stock_signals():
+    t, p, n = make()
+    t.rebalance()
+    now = T.session_open_ts(time.time()) + 3 * 3600
+    keys = {(m["strike"], m["opt"]): k for k, m in t.sel.items() if m["symbol"] == "STK8" and m["front"]}
+    atm = t.sel[keys[(1300.0, "CE")]]["atm"]
+    def load(res, sup, ce_mult, straddle):
+        for (k_, o), key in keys.items():
+            oi = 1000
+            if o == "CE" and k_ == res: oi = 50000
+            if o == "PE" and k_ == sup: oi = 40000 * ce_mult
+            t.on_data(key, {"oi": oi, "ltp": (straddle / 2 if k_ == atm else 5.0)}, now)
+    load(1350.0, 1250.0, 1, 40.0); t.stock_signals(now)
+    load(1400.0, 1250.0, 1, 40.0); t.stock_signals(now + 30)        # first sighting of the new wall
+    load(1400.0, 1250.0, 3, 52.0); t.stock_signals(now + 60)        # holds -> shift; PCR up; straddle +30%
+    t._drain_events()
+    k = {a["kind"]: a for a in t.alerts if a["symbol"] == "STK8"}
+    check("OI wall shift (resistance 1350 -> 1400) after it holds", "OI_SHIFT" in k and "1,350 → 1,400" in k["OI_SHIFT"]["reason"])
+    check("PCR shift alert", "PCR" in k and k["PCR"]["dir"] == "UP")
+    check("ATM straddle expansion alert", "STRADDLE" in k and "+30%" in k["STRADDLE"]["reason"])
+    uk = t.u.stocks["STK8"]["underlying_key"]
+    o = T.session_open_ts(time.time())
+    for i, px in enumerate([1300, 1305, 1296, 1302]):
+        t.on_data(uk, {"ltp": px}, o + 60 + i * 120)                 # inside the 15-min opening range
+    t.on_data(uk, {"ltp": 1310}, o + 20 * 60)
+    t._drain_events()
+    orb = [a for a in t.alerts if a["symbol"] == "STK8" and a["kind"] == "ORB"]
+    check("opening-range breakout (stock)", orb and orb[0]["dir"] == "UP" and "1,305" in orb[0]["reason"])
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
-               test_speed]:
+               test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

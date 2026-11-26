@@ -31,9 +31,14 @@ from datetime import datetime, timezone, timedelta
 
 import config
 from trackers.providers import DhanProvider, UpstoxProvider
+from trackers.history import History, label as bu_label, LABELS
+from trackers.nse_context import NseContext
+from trackers.trend import TrendEngine
+from trackers import ivcalc
 
 IST = timezone(timedelta(hours=5, minutes=30))
 ALERTS_PATH = os.path.join(config.DATA, "tracker_alerts.json")
+TRENDS_PATH = os.path.join(config.DATA, "tracker_trends.json")
 HARD_CAP = 25000
 
 SETTINGS = {
@@ -51,6 +56,21 @@ SETTINGS = {
     "trkVolMult": 5,            # volume in window >= this x the day's average pace
     "trkVolWindowMin": 5,
     "trkMinVolLots": 20,        # and at least this many lots traded in the window
+    "trkVolOiRatio": 2.0,       # UNUSUAL: today's volume >= this x yesterday's OI
+    "trkIvSpikePts": 5,         # IV: implied vol moves >= this many points ...
+    "trkIvWindowMin": 15,       # ... within this many minutes
+    "trkTrendBarMin": 3,        # trend engine candle size (min)
+    "trkTrendMinBars": 5,       # candles needed before a trend can be called
+    "trkTrendGreen": 3,         # green (red) candles in a row to start an up (down) trend
+    "trkTrendMinPct": 15,       # option premium move from swing low/high to call a trend
+    "trkTrendMinPctStock": 1.0, # underlying stock move to call a trend
+    "trkAtlAlerts": False,      # all-time-LOW alerts (off: OTM options decay to new lows daily)
+    "trkAthMaxDistPct": 10,     # all-time-HIGH alerts only for strikes within this % of spot
+    "trkPcrShift": 0.25,        # PCR alert: intraday PCR moves this much from the day's first reading
+    "trkStraddlePct": 15,       # ATM straddle (CE+PE) premium expands this % from the day's first reading
+    "trkOrbMin": 15,            # stock opening range = first N minutes from 09:15
+    "trkMwplAlertPct": 90,      # alert when a stock's MWPL usage crosses this (ban at 95)
+    "trkHistDays": 100,         # NSE bhavcopy lookback for multi-day OI / all-time high-low
     "trkCooldownMin": 15,       # same contract+kind+direction won't re-alert inside this
     "trkNewsLookbackMin": 60,   # news this far BEFORE the move counts as a match
     "trkNewsAfterMin": 60,      # keep re-checking UNEXPLAINED alerts this long
@@ -367,52 +387,88 @@ class Detector:
 # ======================================================================
 # Tracker
 # ======================================================================
+def _fmt(v):
+    if v is None:
+        return "--"
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return f"{v:,}" if isinstance(v, int) else f"{v:g}"
+
+
 class StockOptionsTracker:
-    def __init__(self, conn, news, universe=None, detector=None, providers=None):
+    def __init__(self, conn, news, universe=None, detector=None, providers=None, history=None, context=None):
         self.conn, self.news = conn, news
         self.u = universe or Universe()
         self.det = detector or Detector()
+        self.trend = TrendEngine(self.det.get)
         self.providers = providers or {"dhan": DhanProvider(setting("trkDhanConnections")),
                                        "upstox": UpstoxProvider(conn)}
+        self.hist = history if history is not None else History(days=setting("trkHistDays"))
+        self.ctx = context if context is not None else NseContext()
         self.p = None                     # active provider
         self.sel = {}                     # key -> meta (everything tracked)
         self.live_keys = set()            # subset streamed over WebSocket
+        self.ukeys = {}                   # underlying key -> symbol (streamed for live spot + stock trends)
         self.latest = {}                  # key -> fields
         self.spots = {}
-        self.alerts = deque(maxlen=1000)
+        self.greeks = {}                  # key -> {iv, delta, gamma, theta, vega}
+        self.ivwin = defaultdict(_Win)
+        self.alerts = deque(maxlen=2000)
+        self.trends = deque(maxlen=5000)
         self._alert_seq = 0
+        self._once = {}                   # once-per-day alert keys -> date
         self._events = queue.Queue()
+        self._newsq = queue.Queue()
+        self._sync_news = True            # tests / direct use resolve news inline; start() moves it to a thread
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._contract_ts = {}
         self._feeds_started = set()
+        self._dirty_trends = False
         self.stats = {"feed": "idle", "ticks": 0, "rest_polls": 0, "last_rebalance": None,
                       "last_rest": None, "rest_every_sec": None, "new_strikes_today": 0, "errors": {}}
-        self._t_rebal = self._t_quote = self._t_master = self._t_recheck = 0.0
-        self._load_alerts()
+        self._t_rebal = self._t_quote = self._t_master = self._t_recheck = self._t_iv = self._t_save = 0.0
+        self._t_hist = self._t_ctx = 0.0
+        self.sig = {}                     # symbol -> intraday stock-level signal state (OI walls, PCR, straddle, ORB)
+        self._load()
 
     # ---------------- persistence ----------------
-    def _load_alerts(self):
-        try:
-            with open(ALERTS_PATH, "r", encoding="utf-8") as f:
-                for a in json.load(f)[-1000:]:
-                    self.alerts.append(a)
-            self._alert_seq = max((a.get("id", 0) for a in self.alerts), default=0)
-        except Exception:
-            pass
+    def _load(self):
+        for path, dq in ((ALERTS_PATH, self.alerts), (TRENDS_PATH, self.trends)):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for a in json.load(f)[-dq.maxlen:]:
+                        dq.append(a)
+            except Exception:
+                pass
+        self._alert_seq = max((a.get("id", 0) for a in self.alerts), default=0)
+        for t in self.trends:                 # a restart can't continue a running trend: close it honestly
+            if t.get("status") == "RUNNING":
+                t.update({"status": "ENDED", "reason_end": "tracker restarted (trend not followed further)"})
 
-    def _save_alerts(self):
+    def _dump(self, path, data):
         try:
-            tmp = ALERTS_PATH + ".tmp"
+            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(list(self.alerts), f)
-            os.replace(tmp, ALERTS_PATH)
+                json.dump(data, f)
+            os.replace(tmp, path)
         except Exception as e:
             self.stats["errors"]["save"] = str(e)[:200]
 
+    def _save_alerts(self):
+        self._dump(ALERTS_PATH, list(self.alerts))
+
+    def _save_trends(self):
+        self._dump(TRENDS_PATH, list(self.trends))
+        self._dirty_trends = False
+
     # ---------------- lifecycle ----------------
     def start(self):
+        self._sync_news = False
         threading.Thread(target=self._main_loop, name="trk-main", daemon=True).start()
+        for i in range(3):               # parallel news lookups (Google News / NSE are ~1 s each)
+            threading.Thread(target=self._news_loop, name=f"trk-news-{i}", daemon=True).start()
+        threading.Thread(target=self._slow_loop, name="trk-slow", daemon=True).start()
 
     def active(self):
         return bool(setting("TRACKER_ENABLED")) and (setting("trkAlwaysOn") or market_window())
@@ -424,6 +480,25 @@ class StockOptionsTracker:
             except Exception as e:
                 self.stats["errors"]["main"] = f"{type(e).__name__}: {e}"[:200]
             self._stop.wait(1)
+
+    def _slow_loop(self):
+        """History (NSE bhavcopy) + NSE context — slow downloads, kept off the main loop."""
+        while not self._stop.is_set():
+            now = time.time()
+            try:
+                if self.hist is not False and (now - self._t_hist > 1800 or not self.hist.dates):
+                    self._t_hist = now
+                    self.hist.load()
+            except Exception as e:
+                self.stats["errors"]["history"] = f"{type(e).__name__}: {e}"[:200]
+            try:
+                if self.ctx is not False and now - self._t_ctx > 3600:
+                    self._t_ctx = now
+                    self.ctx.refresh(force=True)
+                    self.context_alerts()
+            except Exception as e:
+                self.stats["errors"]["context"] = f"{type(e).__name__}: {e}"[:200]
+            self._stop.wait(30)
 
     def choose_provider(self):
         want = str(setting("trkProvider")).lower()
@@ -465,25 +540,37 @@ class StockOptionsTracker:
             self.rebalance()
         if self.p.name == "upstox":
             calls = max(1, -(-len(self.sel) // 500))
-            every = max(float(setting("trkQuotePollSec")), calls * 60 / 40.0)   # <= 40 calls/min (Upstox: 2000/30min, shared with the other bots)
+            every = max(float(setting("trkQuotePollSec")), calls * 60 / 40.0)   # <= 40 calls/min (Upstox: 2000/30min, shared)
             self.stats["rest_every_sec"] = round(every)
             if now - self._t_quote > every:
                 self._t_quote = now
                 self.poll_rest()
+        if now - self._t_iv > 30:
+            self._t_iv = now
+            self.compute_greeks(now)
+            self.stock_signals(now)
         self.stats["feed"] = self.p.status_text()
         self._drain_events()
         if now - self._t_recheck > 120:
             self._t_recheck = now
             self.recheck_unexplained()
+        if self._dirty_trends and now - self._t_save > 5:
+            self._t_save = now
+            self._save_trends()
 
     # ---------------- universe / subscription ----------------
     def rebalance(self):
         p = self.p or self.choose_provider()
-        spots = p.spots([s["underlying_key"] for s in self.u.stocks.values()])
+        ukeys = {s["underlying_key"]: s["symbol"] for s in self.u.stocks.values()}
+        spots = p.spots(list(ukeys))
         if not spots:
             raise RuntimeError(f"no spot prices from {p.name} (token expired?)")
-        self.spots = spots
+        for k, v in spots.items():          # keep a fresher streamed spot if we have one
+            self.spots[k] = self.spots.get(k) or v
+        self.spots.update({k: v for k, v in spots.items() if k not in self.latest})
         budget = setting("trkBudget")
+        if p.limit >= HARD_CAP:              # all-live provider: reserve room for the underlyings
+            budget = min(budget, p.limit - len(ukeys))
         sel, edge = self.u.select(spots, budget)
         due = [x for x in edge if time.time() - self._contract_ts.get(x, 0) > 900][:25]
         added = 0
@@ -496,25 +583,37 @@ class StockOptionsTracker:
         if added:
             self.stats["new_strikes_today"] += added
             sel, edge = self.u.select(spots, budget)
-        live = set(sel) if len(sel) <= p.limit else set(sorted(sel, key=lambda k: sel[k]["dist"])[:p.limit])
+        room = max(0, p.limit - len(ukeys))
+        live = set(sel) if len(sel) <= room else set(sorted(sel, key=lambda k: sel[k]["dist"])[:room])
         with self._lock:
             gone = set(self.sel) - set(sel)
-            self.sel, self.live_keys = sel, live
+            self.sel, self.live_keys, self.ukeys = sel, live, ukeys
         self.det.forget(gone)
+        self.trend.forget(gone)
         for k in gone:
             self.latest.pop(k, None)
-        d = p.set_subscription(live)
+            self.greeks.pop(k, None)
+            self.ivwin.pop(k, None)
+        d = p.set_subscription(live | set(ukeys))
         self.stats["last_rebalance"] = now_ist().strftime("%H:%M:%S")
         self.stats["edge_stocks"] = len(edge)
         return {"tracked": len(sel), "live": len(live), **d}
 
     # ---------------- data in ----------------
     def on_data(self, key, f, ts=None):
-        """Provider callback (WS thread or REST poll): merge fields, run detectors."""
+        """Provider callback (WS thread or REST poll): merge fields, run detectors + trend engine."""
+        ts = ts or time.time()
         m = self.sel.get(key)
         if m is None:
+            sym = self.ukeys.get(key)
+            if sym and f.get("ltp"):         # underlying stock tick: live spot + stock trend + ORB
+                self.spots[key] = f["ltp"]
+                self._orb(sym, key, f["ltp"], ts)
+                cur = self.latest.setdefault(key, {})
+                cur.update(f)
+                for e in self.trend.on_price(key, f["ltp"], ts, f.get("vwap") or cur.get("vwap"), underlying=True):
+                    self._trend_event(e, sym, None, ts)
             return
-        ts = ts or time.time()
         cur = self.latest.get(key)
         if cur is None:
             cur = self.latest[key] = {}
@@ -526,6 +625,9 @@ class StockOptionsTracker:
             ev = self.det.on_price(key, f["ltp"], ts)
             if ev:
                 put(ev)
+            for e in self.trend.on_price(key, f["ltp"], ts, cur.get("vwap")):
+                self._trend_event(e, m["symbol"], m, ts)
+            self._ath_check(key, m, cur, ts)
         if f.get("oi") is not None:
             ev = self.det.on_oi(key, f["oi"], ts, m["lot"])
             if ev:
@@ -534,6 +636,7 @@ class StockOptionsTracker:
             ev = self.det.on_volume(key, f["volume"], ts, m["lot"])
             if ev:
                 put(ev)
+            self._unusual_check(key, m, cur, ts)
 
     def poll_rest(self):
         with self._lock:
@@ -551,45 +654,361 @@ class StockOptionsTracker:
         self.stats["rest_polls"] += 1
         self.stats["last_rest"] = now_ist().strftime("%H:%M:%S")
 
+    # ---------------- derived per-strike data ----------------
+    def _tok(self, key):
+        return key.split("|", 1)[1] if "|" in key else key
+
+    def hist_of(self, key):
+        h = self.hist
+        return h.contract(self._tok(key)) if h else None
+
+    def prev_oi(self, key, lv=None):
+        lv = lv if lv is not None else self.latest.get(key, {})
+        if lv.get("prev_oi"):
+            return lv["prev_oi"]
+        hc = self.hist_of(key)
+        return hc.get("prev_oi") if hc else None
+
+    def _once_today(self, k):
+        d = now_ist().strftime("%Y-%m-%d")
+        if self._once.get(k) == d:
+            return False
+        self._once[k] = d
+        return True
+
+    def _ath_check(self, key, m, cur, ts):
+        hc = self.hist_of(key)
+        if not hc or hc.get("ath") is None:
+            return
+        ltp = cur.get("ltp")
+        if not ltp or ltp < setting("trkMinPremium") or abs(m["strike"] - m["spot"]) / m["spot"] * 100 > setting("trkAthMaxDistPct"):
+            return
+        if ltp > hc["ath"] and self._once_today(("ATH", key)):
+            self._events.put({"kind": "ATH", "dir": "UP", "key": key, "from": hc["ath"], "to": ltp,
+                              "pct": round((ltp - hc["ath"]) / hc["ath"] * 100, 1), "ts": ts,
+                              "reason": f"premium {_fmt(ltp)} broke the contract's ALL-TIME HIGH {_fmt(hc['ath'])} "
+                                        f"(set {hc['ath_d']}, listed {hc['listed']})"})
+        elif setting("trkAtlAlerts") and hc.get("atl") and ltp < hc["atl"] and self._once_today(("ATL", key)):
+            self._events.put({"kind": "ATL", "dir": "DOWN", "key": key, "from": hc["atl"], "to": ltp,
+                              "pct": round((ltp - hc["atl"]) / hc["atl"] * 100, 1), "ts": ts,
+                              "reason": f"premium {_fmt(ltp)} broke the contract's ALL-TIME LOW {_fmt(hc['atl'])} "
+                                        f"(set {hc['atl_d']}, listed {hc['listed']})"})
+
+    def _unusual_check(self, key, m, cur, ts):
+        vol, poi = cur.get("volume"), self.prev_oi(key, cur)
+        if not vol or not poi or vol < setting("trkMinVolLots") * (m["lot"] or 1):
+            return
+        ratio = vol / poi
+        if ratio >= setting("trkVolOiRatio") and self._once_today(("UNUSUAL", key)):
+            self._events.put({"kind": "UNUSUAL", "dir": "UP", "key": key, "from": poi, "to": vol,
+                              "pct": round(ratio, 1), "ts": ts,
+                              "reason": f"today's volume {_fmt(vol)} = {ratio:.1f}x yesterday's OI {_fmt(poi)} "
+                                        f"(threshold {setting('trkVolOiRatio')}x) — fresh positions, not just churn"})
+
+    # ---------------- stock-level signals ----------------
+    def _sig(self, sym, ts):
+        day = datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d")
+        st = self.sig.get(sym)
+        if st is None or st["day"] != day:
+            st = self.sig[sym] = {"day": day, "orb_hi": None, "orb_lo": None, "orb_done": set(),
+                                  "pcr0": None, "str0": None, "res": None, "sup": None, "res_cand": None, "sup_cand": None}
+        return st
+
+    def _orb(self, sym, key, px, ts):
+        st = self._sig(sym, ts)
+        o = session_open_ts(ts)
+        if ts < o:
+            return
+        if ts <= o + setting("trkOrbMin") * 60:
+            st["orb_hi"] = px if st["orb_hi"] is None else max(st["orb_hi"], px)
+            st["orb_lo"] = px if st["orb_lo"] is None else min(st["orb_lo"], px)
+            return
+        if st["orb_hi"] is None:
+            return
+        for d, hit, lvl in (("UP", px > st["orb_hi"], st["orb_hi"]), ("DOWN", px < st["orb_lo"], st["orb_lo"])):
+            if hit and d not in st["orb_done"]:
+                st["orb_done"].add(d)
+                self._events.put({"kind": "ORB", "dir": d, "key": key, "symbol": sym, "from": lvl, "to": px,
+                                  "pct": round((px - lvl) / lvl * 100, 2), "ts": ts,
+                                  "reason": f"{sym} broke its {setting('trkOrbMin')}-min opening range "
+                                            f"{'high' if d == 'UP' else 'low'} {_fmt(lvl)} (range {_fmt(st['orb_lo'])}–"
+                                            f"{_fmt(st['orb_hi'])}) → {_fmt(px)}"})
+
+    def stock_signals(self, now=None):
+        """OI-wall shift, PCR shift, ATM straddle expansion — per stock, front expiry."""
+        now = now or time.time()
+        rows = {}
+        with self._lock:
+            sel = list(self.sel.items())
+        for k, m in sel:
+            if not m.get("front", True):
+                continue
+            lv = self.latest.get(k)
+            if not lv or lv.get("oi") is None:
+                continue
+            r = rows.setdefault(m["symbol"], {"ce": 0, "pe": 0, "res": (0, None, None), "sup": (0, None, None), "atm": {}})
+            side = "ce" if m["opt"] == "CE" else "pe"
+            r[side] += lv["oi"]
+            if side == "ce" and lv["oi"] > r["res"][0]:
+                r["res"] = (lv["oi"], m["strike"], k)
+            if side == "pe" and lv["oi"] > r["sup"][0]:
+                r["sup"] = (lv["oi"], m["strike"], k)
+            if m["strike"] == m["atm"] and lv.get("ltp"):
+                r["atm"][m["opt"]] = (lv["ltp"], k)
+        for sym, r in rows.items():
+            st = self._sig(sym, now)
+            # --- OI walls (needs the new strike to hold for 2 checks in a row) ---
+            for wall, name in (("res", "Resistance (max CALL OI)"), ("sup", "Support (max PUT OI)")):
+                oi, strike, key = r[wall]
+                if strike is None:
+                    continue
+                if st[wall] is None:
+                    st[wall] = strike
+                elif strike != st[wall]:
+                    if st[wall + "_cand"] == strike:
+                        old = st[wall]
+                        st[wall], st[wall + "_cand"] = strike, None
+                        up = strike > old
+                        self._events.put({"kind": "OI_SHIFT", "dir": "UP" if up else "DOWN", "key": key, "symbol": sym,
+                                          "from": old, "to": strike, "pct": round((strike - old) / old * 100, 2), "ts": now,
+                                          "reason": f"{name} shifted {_fmt(old)} → {_fmt(strike)} "
+                                                    f"(now {_fmt(oi)} OI at {_fmt(strike)}) — writers moved "
+                                                    f"{'higher (bullish)' if up else 'lower (bearish)'}"})
+                    else:
+                        st[wall + "_cand"] = strike
+                else:
+                    st[wall + "_cand"] = None
+            # --- PCR shift ---
+            if r["ce"]:
+                pcr = r["pe"] / r["ce"]
+                if st["pcr0"] is None:
+                    st["pcr0"] = pcr
+                elif abs(pcr - st["pcr0"]) >= setting("trkPcrShift"):
+                    d = "UP" if pcr > st["pcr0"] else "DOWN"
+                    if self.det._cool(sym, "PCR", d, now):
+                        self._events.put({"kind": "PCR", "dir": d, "key": r["res"][2] or r["sup"][2], "symbol": sym,
+                                          "from": round(st["pcr0"], 2), "to": round(pcr, 2),
+                                          "pct": round(pcr - st["pcr0"], 2), "ts": now,
+                                          "reason": f"PCR {st['pcr0']:.2f} → {pcr:.2f} since the day's first reading — "
+                                                    f"{'puts being added (supportive)' if d == 'UP' else 'calls being added (capping)'}; "
+                                                    f"check OI walls before reading it as direction"})
+            # --- ATM straddle expansion ---
+            if "CE" in r["atm"] and "PE" in r["atm"]:
+                sp = r["atm"]["CE"][0] + r["atm"]["PE"][0]
+                if st["str0"] is None:
+                    st["str0"] = sp
+                elif (sp - st["str0"]) / st["str0"] * 100 >= setting("trkStraddlePct") and self.det._cool(sym, "STRADDLE", "UP", now):
+                    self._events.put({"kind": "STRADDLE", "dir": "UP", "key": r["atm"]["CE"][1], "symbol": sym,
+                                      "from": round(st["str0"], 2), "to": round(sp, 2),
+                                      "pct": round((sp - st["str0"]) / st["str0"] * 100, 1), "ts": now,
+                                      "reason": f"ATM straddle (CE+PE) {st['str0']:.2f} → {sp:.2f} "
+                                                f"(+{(sp - st['str0']) / st['str0'] * 100:.0f}%) — market pricing a bigger move"})
+
+    def compute_greeks(self, now=None):
+        """Vectorised IV/greeks for every strike with a price; IV-spike detection."""
+        now = now or time.time()
+        with self._lock:
+            items = [(k, m) for k, m in self.sel.items() if self.latest.get(k, {}).get("ltp")]
+        rows = []
+        for k, m in items:
+            sp = self.spots.get(self.u.stocks.get(m["symbol"], {}).get("underlying_key")) or m["spot"]
+            exp = datetime.strptime(m["expiry"], "%Y-%m-%d").replace(hour=15, minute=30, tzinfo=IST).timestamp()
+            rows.append((k, sp, m["strike"], (exp - now) / (365 * 86400), self.latest[k]["ltp"], m["opt"] == "CE", m))
+        if not rows:
+            return 0
+        g = ivcalc.iv_greeks([r[1] for r in rows], [r[2] for r in rows], [r[3] for r in rows],
+                             [r[4] for r in rows], [r[5] for r in rows])
+        span = setting("trkIvWindowMin") * 60
+        pts = setting("trkIvSpikePts")
+        minp = setting("trkMinPremium")
+        for i, (k, sp, K, T, ltp, call, m) in enumerate(rows):
+            iv = g["iv"][i]
+            if iv != iv:          # NaN
+                self.greeks.pop(k, None)
+                continue
+            self.greeks[k] = {"iv": float(iv), "delta": float(g["delta"][i]), "gamma": float(g["gamma"][i]),
+                              "theta": float(g["theta"][i]), "vega": float(g["vega"][i])}
+            if ltp < minp or abs(K - sp) / sp > 0.15:      # deep OTM IV is noise
+                continue
+            w = self.ivwin[k]
+            w.push(now, float(iv), span, thin=20)
+            if len(w.q) < 2:
+                continue
+            lo, hi = w.mn[0][1], w.mx[0][1]
+            for d, base, ok in (("UP", lo, iv - lo >= pts), ("DOWN", hi, hi - iv >= pts)):
+                if ok and self.det._cool(k, "IV", d, now):
+                    self._events.put({"kind": "IV", "dir": d, "key": k, "from": round(base, 2), "to": round(float(iv), 2),
+                                      "pct": round(float(iv) - base, 2), "ts": now,
+                                      "reason": f"implied volatility {base:.1f}% → {iv:.1f}% "
+                                                f"({float(iv) - base:+.1f} pts in {setting('trkIvWindowMin')} min, "
+                                                f"threshold {pts} pts) — option {'re-priced richer' if d == 'UP' else 'IV crush'}"})
+        return len(rows)
+
+    def context_alerts(self):
+        """Once a day per stock: F&O ban, MWPL usage crossing the alert level."""
+        ts = time.time()
+        for sym, s in self.u.stocks.items():
+            info = self.ctx.info(sym)
+            pct = info.get("mwpl_pct")
+            if info["ban"] and self._once_today(("BAN", sym)):
+                self._ctx_alert(sym, "BAN", f"{sym} is in the F&O BAN list for {self.ctx.ban_date} "
+                                            f"(MWPL {pct}%) — no fresh positions allowed", ts)
+            elif pct is not None and pct >= setting("trkMwplAlertPct") and self._once_today(("MWPL", sym)):
+                self._ctx_alert(sym, "MWPL", f"{sym} MWPL usage {pct}% ({info.get('mwpl_chg'):+}% vs previous day) — "
+                                             f"ban triggers at 95%", ts)
+
+    def _ctx_alert(self, sym, kind, reason, ts):
+        self._alert_seq += 1
+        a = {"id": self._alert_seq, "symbol": sym, "name": self.u.stocks.get(sym, {}).get("name", sym), "kind": kind,
+             "dir": "UP", "ts": ts, "time": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S"),
+             "spot": None, "expiry": None, "max_pct": 0, "legs": [], "reason": reason,
+             "first_alert": self._first_alert(sym, ts), "status": "INFO", "news": [], "context": self.ctx.info(sym)}
+        with self._lock:
+            self.alerts.append(a)
+            self._save_alerts()
+
+    # ---------------- trends ----------------
+    def _trend_event(self, e, sym, m, ts):
+        tr = e["trend"]
+        if e["phase"] == "START":
+            tr.update({"symbol": sym, "strike": m["strike"] if m else None, "opt": m["opt"] if m else "STOCK",
+                       "expiry": m["expiry"] if m else None, "first_alert": self._first_alert(sym, ts)})
+            with self._lock:
+                self.trends.append(tr)
+        self._dirty_trends = True
+        what = f"{sym} {_fmt(tr['strike'])}{tr['opt']}" if m else f"{sym} (stock)"
+        if e["phase"] == "START":
+            reason = (f"{what}: {tr['dir']} trend started at {tr['started_time']} from {_fmt(tr['origin'])}, "
+                      f"confirmed {tr['confirmed_time']} at {_fmt(tr['confirm_price'])} — {tr['reason_start']}")
+        else:
+            reason = (f"{what}: {tr['dir']} trend that started {tr['started_time']} ENDED {tr['ended_time']} at "
+                      f"{_fmt(tr['end_price'])} — {tr['reason_end']}. Result {tr['move_pct']:+.1f}% "
+                      f"(best {tr['best_move_pct']:+.1f}%), {tr['candles']} candles, {tr['green']} green / {tr['red']} red, "
+                      f"one-sided {tr['one_sided_pct']}%, max pull-back {tr['max_pullback_pct']}%, {tr['duration_min']} min")
+        self._events.put({"kind": "TREND" if e["phase"] == "START" else "TREND_END", "dir": tr["dir"],
+                          "key": tr["key"], "from": tr["origin"],
+                          "to": tr["confirm_price"] if e["phase"] == "START" else tr["end_price"],
+                          "pct": tr["move_pct"], "ts": ts, "reason": reason, "trend_id": tr["id"],
+                          "symbol": sym})
+
+    def trend_list(self, status=None, symbol=None, limit=300):
+        out = []
+        for t in reversed(self.trends):
+            if status and t.get("status") != status.upper():
+                continue
+            if symbol and t.get("symbol") != symbol.upper():
+                continue
+            out.append(t)
+            if len(out) >= limit:
+                break
+        return out
+
     # ---------------- alerts + news ----------------
-    def _drain_events(self):
-        while True:
+    def _drain_events(self, budget=0.5):
+        t_end = time.monotonic() + budget
+        while time.monotonic() < t_end:
             try:
                 ev = self._events.get_nowait()
             except queue.Empty:
                 return
-            self.handle_event(ev)
+            try:
+                self.handle_event(ev)
+            except Exception as e:
+                self.stats["errors"]["alert"] = f"{type(e).__name__}: {e}"[:200]
+
+    def _first_alert(self, sym, ts):
+        """Time of the first alert for this stock today (so every alert shows where it all began)."""
+        day = datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d")
+        first = None
+        for a in self.alerts:
+            if a["symbol"] == sym and a["time"][:10] == day:
+                first = a
+                break
+        return {"time": first["time"][11:], "kind": first["kind"], "reason": first.get("reason")} if first else None
+
+    def _reason(self, ev, m):
+        k = ev["kind"]
+        if ev.get("reason"):
+            return ev["reason"]
+        if k == "PRICE":
+            return (f"premium {_fmt(ev['from'])} → {_fmt(ev['to'])} ({ev['pct']:+.1f}%) within {setting('trkWindowMin')} min "
+                    f"(threshold {setting('trkSpikePct')}%)")
+        if k == "OI":
+            return (f"OI {_fmt(ev['from'])} → {_fmt(ev['to'])} ({ev['pct']:+.1f}%) within {setting('trkOiWindowMin')} min "
+                    f"(threshold {setting('trkOiPct')}%, >= {setting('trkMinOiLots')} lots)")
+        if k == "VOLUME":
+            return (f"{_fmt(ev['to'])} traded in {setting('trkVolWindowMin')} min = {ev['pct']}x the day's normal pace "
+                    f"({_fmt(ev['from'])}) (threshold {setting('trkVolMult')}x)")
+        return k
 
     def handle_event(self, ev):
         m = self.sel.get(ev["key"]) or {}
-        sym = m.get("symbol", "?")
+        sym = ev.get("symbol") or m.get("symbol") or self.ukeys.get(ev["key"], "?")
         lv = self.latest.get(ev["key"], {})
-        leg = {"key": ev["key"], "strike": m.get("strike"), "opt": m.get("opt"), "from": ev["from"],
-               "to": ev["to"], "pct": ev["pct"], "ltp": lv.get("ltp"), "vwap": lv.get("vwap"),
-               "oi": lv.get("oi"), "volume": lv.get("volume"),
-               "time": datetime.fromtimestamp(ev["ts"], IST).strftime("%H:%M:%S")}
+        gk = self.greeks.get(ev["key"], {})
+        reason = self._reason(ev, m)
+        leg = {"key": ev["key"], "strike": m.get("strike"), "opt": m.get("opt") or ("STOCK" if not m else None),
+               "from": ev["from"], "to": ev["to"], "pct": ev["pct"], "ltp": lv.get("ltp"), "vwap": lv.get("vwap"),
+               "oi": lv.get("oi"), "volume": lv.get("volume"), "iv": gk.get("iv"), "reason": reason,
+               "trend_id": ev.get("trend_id"), "time": datetime.fromtimestamp(ev["ts"], IST).strftime("%H:%M:%S")}
+        if m:
+            leg["buildup"] = self._buildup(ev["key"], lv)
         with self._lock:
             for a in reversed(self.alerts):
                 if a["ts"] < ev["ts"] - setting("trkWindowMin") * 60:
                     break
                 if a["symbol"] == sym and a["kind"] == ev["kind"] and a["dir"] == ev["dir"]:
                     a["legs"].append(leg)
-                    a["max_pct"] = max(a["max_pct"], abs(ev["pct"]))
+                    a["max_pct"] = max(a["max_pct"], abs(ev["pct"] or 0))
                     self._save_alerts()
                     return a
         s = self.u.stocks.get(sym, {})
-        news = self.news.news_for(sym, s.get("name", sym),
-                                  since_ts=ev["ts"] - setting("trkNewsLookbackMin") * 60, until_ts=ev["ts"] + 60)
+        first = self._first_alert(sym, ev["ts"])
         self._alert_seq += 1
         a = {"id": self._alert_seq, "symbol": sym, "name": s.get("name", sym), "kind": ev["kind"],
              "dir": ev["dir"], "ts": ev["ts"],
              "time": datetime.fromtimestamp(ev["ts"], IST).strftime("%Y-%m-%d %H:%M:%S"),
-             "spot": m.get("spot"), "expiry": m.get("expiry"), "max_pct": abs(ev["pct"]),
-             "legs": [leg], "status": "NEWS-MATCH" if news else "UNEXPLAINED", "news": news[:8]}
+             "spot": m.get("spot") or self.spots.get(s.get("underlying_key")), "expiry": m.get("expiry"),
+             "max_pct": abs(ev["pct"] or 0), "legs": [leg], "reason": reason,
+             "first_alert": first or {"time": datetime.fromtimestamp(ev["ts"], IST).strftime("%H:%M:%S"),
+                                      "kind": ev["kind"], "reason": reason},
+             "trend_id": ev.get("trend_id"), "context": self.ctx.info(sym) if self.ctx else {},
+             "status": "CHECKING", "news": []}
         with self._lock:
             self.alerts.append(a)
-            self._save_alerts()
+        self._newsq.put(a)                 # news lookup off the hot path (network: ~1 s per stock)
+        if self._sync_news:
+            self._news_pass()
         return a
+
+    def _news_pass(self):
+        """Resolve CHECKING alerts: NEWS-MATCH (news before the move) or UNEXPLAINED."""
+        done = 0
+        while True:
+            try:
+                a = self._newsq.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                news = self.news.news_for(a["symbol"], a.get("name", a["symbol"]),
+                                          since_ts=a["ts"] - setting("trkNewsLookbackMin") * 60, until_ts=a["ts"] + 60)
+            except Exception as e:
+                news = []
+                self.stats["errors"]["news"] = str(e)[:200]
+            a["status"], a["news"] = ("NEWS-MATCH" if news else "UNEXPLAINED"), news[:8]
+            done += 1
+        if done:
+            with self._lock:
+                self._save_alerts()
+        return done
+
+    def _news_loop(self):
+        while not self._stop.is_set():
+            try:
+                self._news_pass()
+            except Exception as e:
+                self.stats["errors"]["news"] = f"{type(e).__name__}: {e}"[:200]
+            self._stop.wait(1)
 
     def recheck_unexplained(self, now=None):
         now = now or time.time()
@@ -607,10 +1026,30 @@ class StockOptionsTracker:
             self._save_alerts()
 
     # ---------------- views ----------------
+    def _buildup(self, k, lv):
+        ltp, pc, oi = lv.get("ltp"), lv.get("prev_close"), lv.get("oi")
+        poi = self.prev_oi(k, lv)
+        if not ltp or not pc or oi is None or not poi:
+            return None
+        pch, och = (ltp - pc) / pc * 100, (oi - poi) / poi * 100
+        if abs(pch) < 1 or abs(och) < 2:
+            return None
+        return bu_label(pch, och)
+
     def _row(self, k, m):
         lv = self.latest.get(k, {})
         ltp, hi, lo, vwap = lv.get("ltp"), lv.get("high"), lv.get("low"), lv.get("vwap")
-        oi, poi, pc = lv.get("oi"), lv.get("prev_oi"), lv.get("prev_close")
+        oi, pc = lv.get("oi"), lv.get("prev_close")
+        poi = self.prev_oi(k, lv)
+        hc = self.hist_of(k) or {}
+        gk = self.greeks.get(k, {})
+        bid, ask = lv.get("bid"), lv.get("ask")
+        tbq, tsq = lv.get("tbq"), lv.get("tsq")
+        ath = max(x for x in (hc.get("ath"), hi) if x) if (hc.get("ath") or hi) else None
+        atl_c = [x for x in (hc.get("atl"), lo) if x]
+        atl = min(atl_c) if atl_c else None
+        tr = self.trend.running(k)
+        vol = lv.get("volume")
         return {"key": k, "symbol": m["symbol"], "strike": m["strike"], "opt": m["opt"], "atm": m["atm"],
                 "spot": m["spot"], "expiry": m["expiry"], "front": m.get("front", True), "lot": m["lot"],
                 "live": k in self.live_keys,
@@ -618,11 +1057,27 @@ class StockOptionsTracker:
                 "vwap": vwap, "above_vwap": (ltp > vwap) if ltp and vwap else None,
                 "open": lv.get("open"), "high": hi, "low": lo,
                 "range_pos": round((ltp - lo) / (hi - lo) * 100) if ltp and hi and lo and hi > lo else None,
-                "volume": lv.get("volume"), "vol_win": self.det.recent_volume(k),
-                "oi": oi, "oi_chg": (oi - poi) if oi is not None and poi else None,
+                "volume": vol, "vol_win": self.det.recent_volume(k),
+                "vol_oi": round(vol / poi, 2) if vol and poi else None,
+                "oi": oi, "prev_oi": poi, "oi_chg": (oi - poi) if oi is not None and poi else None,
                 "oi_chg_pct": round((oi - poi) / poi * 100, 1) if oi is not None and poi else None,
                 "oi_hi": lv.get("oi_hi"), "oi_lo": lv.get("oi_lo"),
-                "tbq": lv.get("tbq"), "tsq": lv.get("tsq"), "chg_win_pct": self.det.change_pct(k)}
+                "buildup": self._buildup(k, lv),
+                "oi_5d": hc.get("oi_5d"), "oi_20d": hc.get("oi_20d"), "oi_streak": hc.get("oi_streak"),
+                "hist_labels": hc.get("labels"),
+                "ath": ath, "ath_d": hc.get("ath_d") if hc.get("ath") and (not hi or hc["ath"] >= hi) else "today",
+                "atl": atl, "atl_d": hc.get("atl_d") if hc.get("atl") and (not lo or hc["atl"] <= lo) else "today",
+                "listed": hc.get("listed"),
+                "iv": gk.get("iv"), "delta": gk.get("delta"), "gamma": gk.get("gamma"), "theta": gk.get("theta"),
+                "vega": gk.get("vega"),
+                "bid": bid, "ask": ask,
+                "spread_pct": round((ask - bid) / ((ask + bid) / 2) * 100, 1) if bid and ask else None,
+                "aggressor": ("BUY" if ltp and ask and ltp >= ask else "SELL" if ltp and bid and ltp <= bid else None),
+                "tbq": tbq, "tsq": tsq,
+                "buy_pct": round(tbq / (tbq + tsq) * 100) if tbq is not None and tsq and (tbq + tsq) else None,
+                "trend": ({"dir": tr["dir"], "since": tr["started_time"], "move_pct": tr["move_pct"], "id": tr["id"]}
+                          if tr else None),
+                "chg_win_pct": self.det.change_pct(k)}
 
     def board(self, symbol=None, limit=60, sort="move", expiry=None):
         with self._lock:
@@ -637,15 +1092,21 @@ class StockOptionsTracker:
             rows = [self._row(k, m) for k, m in sel if self.det.recent_volume(k)]
             rows.sort(key=lambda r: -(r["vol_win"] or 0))
         elif sort == "oi":
-            rows = [r for r in (self._row(k, m) for k, m in sel) if r["oi_chg_pct"] is not None]
+            rows = [r for r in (self._row(k, m) for k, m in sel if k in self.latest) if r["oi_chg_pct"] is not None]
             rows.sort(key=lambda r: -abs(r["oi_chg_pct"]))
+        elif sort == "unusual":
+            rows = [r for r in (self._row(k, m) for k, m in sel if k in self.latest) if r["vol_oi"]]
+            rows.sort(key=lambda r: -r["vol_oi"])
+        elif sort == "iv":
+            rows = [self._row(k, m) for k, m in sel if k in self.greeks]
+            rows.sort(key=lambda r: -(r["iv"] or 0))
         else:
             rows = [self._row(k, m) for k, m in sel if self.det.change_pct(k) is not None]
             rows.sort(key=lambda r: -abs(r["chg_win_pct"]))
         return rows[:limit]
 
     def summary(self):
-        """Per-stock totals & OI/volume mapping across every tracked strike."""
+        """Per-stock totals & OI/volume mapping across every tracked strike + context + trends."""
         with self._lock:
             sel = list(self.sel.items())
         agg = {}
@@ -657,7 +1118,8 @@ class StockOptionsTracker:
                 a = agg[m["symbol"]] = {"symbol": m["symbol"], "spot": m["spot"], "atm": m["atm"],
                                         "expiry": m["expiry"], "strikes": 0, "ce_oi": 0, "pe_oi": 0,
                                         "ce_oi_chg": 0, "pe_oi_chg": 0, "ce_vol": 0, "pe_vol": 0,
-                                        "_res": (0, None), "_sup": (0, None), "_mv": (0, None)}
+                                        "ce_bu": {x: 0 for x in LABELS}, "pe_bu": {x: 0 for x in LABELS},
+                                        "_res": (0, None), "_sup": (0, None), "_mv": (0, None), "_iv": []}
             a["strikes"] += 1
             lv = self.latest.get(k)
             if not lv:
@@ -666,24 +1128,43 @@ class StockOptionsTracker:
             oi, vol = lv.get("oi") or 0, lv.get("volume") or 0
             a[side + "_oi"] += oi
             a[side + "_vol"] += vol
-            if lv.get("prev_oi"):
-                a[side + "_oi_chg"] += oi - lv["prev_oi"]
+            poi = self.prev_oi(k, lv)
+            if poi and oi:
+                a[side + "_oi_chg"] += oi - poi
+                b = self._buildup(k, lv)
+                if b:
+                    a[side + "_bu"][b] += abs(oi - poi)
             if side == "ce" and oi > a["_res"][0]:
                 a["_res"] = (oi, m["strike"])
             if side == "pe" and oi > a["_sup"][0]:
                 a["_sup"] = (oi, m["strike"])
             if vol > a["_mv"][0]:
                 a["_mv"] = (vol, f'{m["strike"]:g}{m["opt"]}')
+            if m["strike"] == m["atm"] and k in self.greeks:
+                a["_iv"].append(self.greeks[k]["iv"])
         today = now_ist().strftime("%Y-%m-%d")
         n_alerts = defaultdict(int)
         for al in self.alerts:
             if al["time"][:10] == today:
                 n_alerts[al["symbol"]] += 1
+        running = defaultdict(int)
+        for t in self.trends:
+            if t.get("status") == "RUNNING":
+                running[t.get("symbol")] += 1
         out = []
         for a in agg.values():
             a["pcr"] = round(a["pe_oi"] / a["ce_oi"], 2) if a["ce_oi"] else None
             a["resistance"], a["support"], a["max_vol_strike"] = a.pop("_res")[1], a.pop("_sup")[1], a.pop("_mv")[1]
+            ivs = a.pop("_iv")
+            a["atm_iv"] = round(sum(ivs) / len(ivs), 1) if ivs else None
+            for side in ("ce", "pe"):
+                bu = a.pop(side + "_bu")
+                a[side + "_buildup"] = max(bu, key=bu.get) if any(bu.values()) else None
             a["alerts"] = n_alerts.get(a["symbol"], 0)
+            a["trends"] = running.get(a["symbol"], 0)
+            st = self.trend.running(self.u.stocks.get(a["symbol"], {}).get("underlying_key"))
+            a["stock_trend"] = {"dir": st["dir"], "since": st["started_time"], "move_pct": st["move_pct"]} if st else None
+            a.update(self.ctx.info(a["symbol"]) if self.ctx else {})
             out.append(a)
         out.sort(key=lambda a: -(a["ce_vol"] + a["pe_vol"]))
         return out
@@ -699,15 +1180,23 @@ class StockOptionsTracker:
             for m in self.sel.values():
                 per[m["symbol"]] += 1
         p = self.p
+        today = now_ist().strftime("%Y-%m-%d")
         return {"enabled": bool(setting("TRACKER_ENABLED")), "active": self.active(),
                 "provider": p.name if p else None, "live_limit": p.limit if p else None,
                 "dhan_available": self.providers["dhan"].available() if "dhan" in self.providers else False,
                 "dhan_error": getattr(self.providers.get("dhan"), "fatal", None),
                 "stocks_in_master": len(self.u.stocks), "stocks_tracked": len(per),
-                "instruments_tracked": n, "instruments_live": nl,
+                "instruments_tracked": n, "instruments_live": nl, "underlyings_live": len(self.ukeys),
                 "budget": min(int(setting("trkBudget")), HARD_CAP),
                 "per_stock": (min(per.values()), max(per.values())) if per else (0, 0),
-                "alerts_today": sum(1 for a in self.alerts if a["time"][:10] == now_ist().strftime("%Y-%m-%d")),
+                "alerts_today": sum(1 for a in self.alerts if a["time"][:10] == today),
+                "trends_running": sum(1 for t in self.trends if t.get("status") == "RUNNING"),
+                "trends_today": sum(1 for t in self.trends
+                                    if datetime.fromtimestamp(t.get("confirmed_at") or 0, IST).strftime("%Y-%m-%d") == today),
+                "greeks": len(self.greeks),
+                "history": self.hist.status if self.hist else "off",
+                "context": ({"ban": sorted(self.ctx.ban), "ban_date": self.ctx.ban_date, "errors": self.ctx.errors}
+                            if self.ctx else None),
                 "news_errors": self.news.errors, **self.stats,
                 "settings": {k: setting(k) for k in SETTINGS}}
 

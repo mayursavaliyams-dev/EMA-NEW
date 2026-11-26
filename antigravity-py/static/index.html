@@ -88,7 +88,14 @@
   .trk-set input{width:70px;background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;padding:2px 4px;font-family:var(--mono)}
   .flt button{background:transparent;border:1px solid var(--bd);color:var(--mut);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px}
   .flt button.on{color:var(--buy);border-color:var(--buy)}
-  #trk-ladder td,#trk-movers td,#trk-sum td{padding:2px 5px;white-space:nowrap}
+  #trk-ladder td,#trk-movers td,#trk-sum td,#trk-trends td,#trk-hist td,#trk-sdays td,#trk-sbuild td{padding:2px 5px;white-space:nowrap}
+  #trk-trends th,#trk-hist th,#trk-sdays th,#trk-sbuild th{position:sticky;top:0;background:var(--card)}
+  #trk-hist tbody tr,#trk-trends tbody tr{cursor:pointer} #trk-hist tbody tr:hover td,#trk-trends tbody tr:hover td{background:rgba(41,98,255,.08)}
+  .bu{font-family:var(--mono);font-size:9px;font-weight:700;padding:0 4px;border-radius:3px}
+  .bu-LB{background:rgba(0,245,212,.15);color:var(--buy)} .bu-SB{background:rgba(247,37,133,.15);color:var(--sell)}
+  .bu-SC{background:rgba(143,168,255,.18);color:#8fa8ff} .bu-LU{background:rgba(255,214,10,.12);color:var(--warn)}
+  .ctx{font-family:var(--mono);font-size:9px;font-weight:700;padding:0 4px;border-radius:3px;background:rgba(247,37,133,.18);color:var(--sell)}
+  .why{font-size:11px;color:var(--txt);margin-top:3px;line-height:1.35} .why b{color:var(--warn)}
   #trk-movers tbody tr,#trk-sum tbody tr,#trk-ladder td.ck{cursor:pointer}
   #trk-sum th{cursor:pointer;position:sticky;top:0;background:var(--card)} #trk-ladder th,#trk-movers th{position:sticky;top:0;background:var(--card)}
   #trk-sum tbody tr:hover td,#trk-movers tbody tr:hover td{background:rgba(41,98,255,.08)}
@@ -174,6 +181,15 @@
     </div>
   </div>
   <div class="panel" style="margin:0 12px 8px">
+    <div class="ph"><span>🧭 Trends — where each trend started, why, and where it ended (saved)</span><span class="flt" id="trk-tflt"></span></div>
+    <div style="max-height:40vh;overflow:auto"><table id="trk-trends"></table></div>
+  </div>
+  <div class="panel" style="margin:0 12px 8px">
+    <div class="ph"><span>🗓️ Multi-day OI (NSE bhavcopy) — where OI keeps building, same activity day after day</span>
+      <span style="display:flex;gap:6px;align-items:center"><span class="hl-badge" id="trk-hist-st"></span><span class="flt" id="trk-hwin"></span></span></div>
+    <div style="max-height:34vh;overflow:auto"><table id="trk-hist"></table></div>
+  </div>
+  <div class="panel" style="margin:0 12px 8px">
     <div class="ph"><span>📊 All F&amp;O stocks — totals &amp; OI mapping (front expiry)</span>
       <span style="display:flex;gap:6px;align-items:center"><input id="trk-find" placeholder="search…" style="background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px;padding:2px 6px;width:110px">
       <span class="hl-badge">click a header to sort · a row → ladder</span></span></div>
@@ -185,6 +201,11 @@
         <select id="trk-sym" class="trk-sel"></select><select id="trk-exp" class="trk-sel"></select>
         <button class="tg" onclick="trkChart('', TRK_SYM)">📈 Stock chart</button></span></div>
     <div style="max-height:52vh;overflow:auto"><table id="trk-ladder"></table></div>
+    <div class="ph" style="border-top:1px solid var(--bd)"><span id="trk-sd-title">🗓️ Day-by-day record</span></div>
+    <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:8px;padding:0 8px">
+      <div style="max-height:30vh;overflow:auto"><table id="trk-sdays"></table></div>
+      <div style="max-height:30vh;overflow:auto"><table id="trk-sbuild"></table></div>
+    </div>
     <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
     <div class="trk-news" id="trk-news" style="padding:4px 10px;max-height:22vh;overflow:auto"></div>
   </div>
@@ -561,15 +582,24 @@ const safeUrl=u=>/^https?:\/\//i.test(u||'')?esc(u):'#';
 const nf=v=>v==null?'--':Number(v).toLocaleString('en-IN');
 const sg=v=>v==null?'--':`<span class="${v>=0?'up':'down'}">${v>0?'+':''}${typeof v==='number'?v.toLocaleString('en-IN'):v}</span>`;
 const pc=v=>v==null?'--':`<span class="${v>=0?'up':'down'}">${v>0?'+':''}${v}%</span>`;
+const BU={LB:'Long buildup',SB:'Short buildup',SC:'Short covering',LU:'Long unwinding'};
+const bu=x=>x?`<span class="bu bu-${x}" title="${BU[x]}">${x}</span>`:'';
+const streak=n=>n==null?'--':n===0?'0':`<span class="${n>0?'up':'down'}">${n>0?'▲':'▼'}${Math.abs(n)}d</span>`;
 let TRK_FLT='', TRK_SYM='', TRK_EXP='', TRK_MSORT='move', TRK_SORT='vol', TRK_DESC=true, TRK_SUM=[], TRK_CH=null, TRK_CHK={key:'',sym:'',iv:'1'};
+let TRK_TFLT='', TRK_HWIN=5, TRK_HIST=[], TRK_HT=0;
 const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan/upstox)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
   trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
-  trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkCooldownMin:'Cooldown (min)',
-  trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
+  trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkVolOiRatio:'Unusual: Vol/OI ×',
+  trkIvSpikePts:'IV spike (pts)',trkIvWindowMin:'IV window (min)',trkTrendBarMin:'Trend candle (min)',trkTrendMinBars:'Trend warm-up candles',trkTrendGreen:'Trend: candles in a row',
+  trkTrendMinPct:'Trend min move % (option)',trkTrendMinPctStock:'Trend min move % (stock)',trkMwplAlertPct:'MWPL alert %',trkPcrShift:'PCR shift alert',trkStraddlePct:'Straddle expansion %',trkOrbMin:'Opening range (min)',trkAtlAlerts:'All-time LOW alerts',trkAthMaxDistPct:'ATH alert: max dist % from spot',trkHistDays:'History days',
+  trkCooldownMin:'Cooldown (min)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
+const KIND={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst',UNUSUAL:'Unusual Vol/OI',IV:'IV',ATH:'All-time HIGH',ATL:'All-time LOW',TREND:'Trend START',TREND_END:'Trend END',BAN:'F&O BAN',MWPL:'MWPL',OI_SHIFT:'OI wall shift',PCR:'PCR shift',STRADDLE:'Straddle expansion',ORB:'Opening-range breakout'};
 const flt=(id,items,cur,fn)=>{$(id).innerHTML=items.map(([v,l])=>`<button data-v="${v}" class="${v===cur?'on':''}">${l}</button>`).join(' ');
   $(id).querySelectorAll('button').forEach(b=>b.onclick=()=>{$(id).querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));fn(b.dataset.v);});};
-flt('trk-flt',[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after']],'',v=>{TRK_FLT=v;renderTracker();});
-flt('trk-msort',[['move','Price move'],['volume','Volume now'],['oi','OI change']],'move',v=>{TRK_MSORT=v;renderTracker();});
+flt('trk-flt',[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after'],['INFO','Context']],'',v=>{TRK_FLT=v;renderTracker();});
+flt('trk-msort',[['move','Price move'],['volume','Volume now'],['oi','OI change'],['unusual','Vol/OI'],['iv','IV']],'move',v=>{TRK_MSORT=v;renderTracker();});
+flt('trk-tflt',[['','All'],['RUNNING','Running'],['ENDED','Ended']],'',v=>{TRK_TFLT=v;renderTrends();});
+flt('trk-hwin',[['5','5 days'],['10','10 days'],['20','20 days']],'5',v=>{TRK_HWIN=+v;TRK_HT=0;renderHistory();});
 async function trkSettings(){
   const st=await j('/api/tracker/settings');
   $('trk-set').innerHTML=Object.entries(st).map(([k,v])=>typeof v==='boolean'
@@ -582,22 +612,36 @@ async function trkSave(){
   const r=await fetch('/api/tracker/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   $('trk-set-msg').textContent=r.error?('❌ '+r.error):('✅ saved '+new Date().toLocaleTimeString()); trkSettings();
 }
-function trkPickSym(s){ if(s!==TRK_SYM){TRK_SYM=s; TRK_EXP='';} $('trk-sym').value=s; renderLadder(); }
+function trkPickSym(s){ if(s!==TRK_SYM){TRK_SYM=s; TRK_EXP='';} $('trk-sym').value=s; renderLadder(); renderStockHist(); }
 $('trk-sym').onchange=e=>trkPickSym(e.target.value);
 $('trk-exp').onchange=e=>{TRK_EXP=e.target.value; renderLadder();};
 $('trk-find').oninput=()=>renderSummary();
+const ctxBadges=r=>(r.ban?'<span class="ctx" title="F&O ban — no fresh positions">BAN</span> ':'')+(r.mwpl_pct!=null&&r.mwpl_pct>=80?`<span class="ctx" title="MWPL usage">MWPL ${r.mwpl_pct}%</span> `:'')+
+  (r.event?`<span class="bu bu-SC" title="${esc(r.event.purpose)} ${esc(r.event.date)}">📅 ${r.event.days===0?'today':r.event.days+'d'}</span>`:'');
 function renderSummary(){
   const f=($('trk-find').value||'').toUpperCase();
-  const cols=[['symbol','Stock'],['spot','Spot'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['pe_oi_chg','PE OI chg'],
-    ['vol','Volume'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],['strikes','Strikes'],['alerts','Alerts']];
+  const cols=[['symbol','Stock'],['spot','Spot'],['stock_trend','Trend'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['ce_buildup','CE act.'],
+    ['pe_oi_chg','PE OI chg'],['pe_buildup','PE act.'],['vol','Volume'],['atm_iv','ATM IV'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],
+    ['mwpl_pct','MWPL %'],['alerts','Alerts'],['trends','Trends']];
   const rows=TRK_SUM.filter(r=>!f||r.symbol.includes(f)).map(r=>({...r,vol:r.ce_vol+r.pe_vol}));
-  rows.sort((a,b)=>{const x=a[TRK_SORT],y=b[TRK_SORT];const c=(typeof x==='string'||typeof y==='string')?String(x??'').localeCompare(String(y??'')):(x??-1e18)-(y??-1e18);return TRK_DESC?-c:c;});
+  const val=(r,k)=>k==='stock_trend'?(r.stock_trend?(r.stock_trend.dir==='UP'?1:-1)*Math.abs(r.stock_trend.move_pct||0):null):r[k];
+  rows.sort((a,b)=>{const x=val(a,TRK_SORT),y=val(b,TRK_SORT);const c=(typeof x==='string'||typeof y==='string')?String(x??'').localeCompare(String(y??'')):(x??-1e18)-(y??-1e18);return TRK_DESC?-c:c;});
   $('trk-sum').innerHTML=`<thead><tr>${cols.map(([k,l])=>`<th onclick="TRK_DESC=TRK_SORT===\'${k}\'?!TRK_DESC:true;TRK_SORT=\'${k}\';renderSummary()">${l}${TRK_SORT===k?(TRK_DESC?' ▼':' ▲'):''}</th>`).join('')}</tr></thead><tbody>`+
-    rows.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b></td><td>${nf(r.spot)}</td><td class="ce">${nf(r.ce_oi)}</td><td class="pe">${nf(r.pe_oi)}</td>
-      <td>${r.pcr??'--'}</td><td>${sg(r.ce_oi_chg)}</td><td>${sg(r.pe_oi_chg)}</td><td>${nf(r.vol)}</td><td class="pe">${r.resistance??'--'}</td><td class="ce">${r.support??'--'}</td>
-      <td>${esc(r.max_vol_strike??'--')}</td><td>${r.strikes}</td><td>${r.alerts?`<b style="color:var(--warn)">${r.alerts}</b>`:0}</td></tr>`).join('')+'</tbody>';
+    rows.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b> ${ctxBadges(r)}</td><td>${nf(r.spot)}</td>
+      <td>${r.stock_trend?`<span class="${r.stock_trend.dir==='UP'?'up':'down'}" title="since ${esc(r.stock_trend.since)}">${r.stock_trend.dir==='UP'?'▲':'▼'} ${r.stock_trend.since}</span>`:'--'}</td>
+      <td class="ce">${nf(r.ce_oi)}</td><td class="pe">${nf(r.pe_oi)}</td><td>${r.pcr??'--'}</td><td>${sg(r.ce_oi_chg)}</td><td>${bu(r.ce_buildup)}</td><td>${sg(r.pe_oi_chg)}</td><td>${bu(r.pe_buildup)}</td>
+      <td>${nf(r.vol)}</td><td>${r.atm_iv??'--'}</td><td class="pe">${r.resistance??'--'}</td><td class="ce">${r.support??'--'}</td>
+      <td>${esc(r.max_vol_strike??'--')}</td><td>${r.mwpl_pct??'--'}</td><td>${r.alerts?`<b style="color:var(--warn)">${r.alerts}</b>`:0}</td><td>${r.trends||0}</td></tr>`).join('')+'</tbody>';
 }
 function rngBar(r){ if(r.range_pos==null) return '--'; return `<span class="rng" title="day low ${r.low} · high ${r.high}"><i style="left:${Math.max(0,Math.min(100,r.range_pos))*0.43}px"></i></span>`; }
+function tip(r){ return esc(`${r.symbol} ${r.strike}${r.opt} · exp ${r.expiry}
+IV ${r.iv??'--'}%  Δ ${r.delta??'--'}  Γ ${r.gamma??'--'}  Θ ${r.theta??'--'}/day  Vega ${r.vega??'--'}
+Bid ${r.bid??'--'} / Ask ${r.ask??'--'}  spread ${r.spread_pct??'--'}%  last trade at ${r.aggressor||'mid'}
+Buy qty ${nf(r.tbq)} / Sell qty ${nf(r.tsq)}  (buyers ${r.buy_pct??'--'}%)
+OI ${nf(r.oi)}  day ${nf(r.oi_lo)}–${nf(r.oi_hi)}  prev ${nf(r.prev_oi)}  5d ${r.oi_5d??'--'}  20d ${r.oi_20d??'--'}  streak ${r.oi_streak??'--'}d
+Vol ${nf(r.volume)}  Vol/OI ${r.vol_oi??'--'}×
+All-time high ${r.ath??'--'} (${r.ath_d??'--'})  low ${r.atl??'--'} (${r.atl_d??'--'})  listed ${r.listed??'--'}
+Last 5 days: ${(r.hist_labels||[]).map(x=>x||'-').join(' ')}`); }
 async function renderLadder(){
   if(!TRK_SYM) return;
   const d=await j('/api/tracker/board?symbol='+encodeURIComponent(TRK_SYM)+(TRK_EXP?'&expiry='+TRK_EXP:''));
@@ -605,58 +649,102 @@ async function renderLadder(){
   $('trk-exp').innerHTML=ex.map(e=>`<option ${e===TRK_EXP?'selected':''}>${e}</option>`).join('');
   const rows=d.rows||[]; const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
   const atm=rows[0]?.atm, spot=rows[0]?.spot;
-  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">click a CE/PE price → chart · ● live tick · VWAP green = LTP above VWAP · H/L = at day high/low · hover OI → day OI range</span>`;
-  const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="8">--</td>';
+  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">hover a price → IV/greeks/bid-ask/history · click → chart · ● live · H/L at day high/low · ★ near all-time high · ↗↘ trend running</span>`;
+  const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="10">--</td>';
     const vw=r.vwap!=null?`<span class="${r.above_vwap?'vw-up':'vw-dn'}">${r.vwap}</span>`:'--';
     const hl=r.range_pos==null?'':r.range_pos>=98?' <b class="up" title="at day high">H</b>':r.range_pos<=2?' <b class="down" title="at day low">L</b>':'';
-    const ltp=`<td class="ck ${side}" onclick="trkChart('${r.key}')">${r.live?'● ':''}${r.ltp??'--'}${hl}</td>`;
-    const c=[`<td title="OI day low ${nf(r.oi_lo)} · high ${nf(r.oi_hi)}">${nf(r.oi)}</td>`,`<td>${sg(r.oi_chg)}</td>`,`<td>${nf(r.volume)}</td>`,`<td>${pc(r.chg_pct)}</td>`,`<td>${vw}</td>`,`<td>${r.low??'--'}/${r.high??'--'}</td>`,`<td>${rngBar(r)}</td>`,ltp];
+    const star=r.ath&&r.ltp&&r.ltp>=r.ath*0.97?' <b style="color:var(--warn)" title="within 3% of the all-time high">★</b>':'';
+    const tr=r.trend?` <b class="${r.trend.dir==='UP'?'up':'down'}" title="trend since ${esc(r.trend.since)} (${r.trend.move_pct}%)">${r.trend.dir==='UP'?'↗':'↘'}</b>`:'';
+    const ltp=`<td class="ck ${side}" title="${tip(r)}" onclick="trkChart('${r.key}')">${r.live?'● ':''}${r.ltp??'--'}${hl}${star}${tr}</td>`;
+    const c=[`<td title="OI day low ${nf(r.oi_lo)} · high ${nf(r.oi_hi)}">${nf(r.oi)}</td>`,`<td>${sg(r.oi_chg)}</td>`,`<td>${bu(r.buildup)}</td>`,`<td>${nf(r.volume)}</td>`,
+      `<td>${r.iv??'--'}</td>`,`<td>${vw}</td>`,`<td title="all-time high ${r.ath_d??''} · low ${r.atl_d??''}">${r.atl??'--'}/${r.ath??'--'}</td>`,`<td>${r.low??'--'}/${r.high??'--'}</td>`,`<td>${rngBar(r)}</td>`,ltp];
     return side==='ce'?c.join(''):c.reverse().join(''); };
-  $('trk-ladder').innerHTML=`<thead><tr><th>CE OI</th><th>OI chg</th><th>Vol</th><th>Chg%</th><th>VWAP</th><th>Low/High</th><th>Range</th><th>CE LTP</th><th>Strike</th>
-    <th>PE LTP</th><th>Range</th><th>Low/High</th><th>VWAP</th><th>Chg%</th><th>Vol</th><th>OI chg</th><th>PE OI</th></tr></thead><tbody>`+
+  const H=['OI','OI chg','Act.','Vol','IV','VWAP','ATL/ATH','Day L/H','Range'];
+  $('trk-ladder').innerHTML=`<thead><tr>${H.map(h=>`<th>CE ${h}</th>`).join('')}<th>CE LTP</th><th>Strike</th><th>PE LTP</th>${H.slice().reverse().map(h=>`<th>PE ${h}</th>`).join('')}</tr></thead><tbody>`+
     Object.keys(by).map(Number).sort((a,b)=>a-b).map(k=>`<tr class="${k===atm?'atm':''}">${cell(by[k].CE,'ce')}<td class="strike">${k}</td>${cell(by[k].PE,'pe')}</tr>`).join('')+'</tbody>';
   const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
   $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
+}
+async function renderStockHist(){
+  if(!TRK_SYM) return;
+  const d=await j('/api/tracker/history/stock?symbol='+encodeURIComponent(TRK_SYM)+'&days=30&n='+TRK_HWIN);
+  const days=(d.days||[]).slice().reverse();
+  $('trk-sd-title').innerHTML=`🗓️ ${esc(TRK_SYM)} — day-by-day record (NSE bhavcopy, ${days.length} days) · <span class="hl-badge">Act. = biggest OI activity that day</span>`;
+  $('trk-sdays').innerHTML=`<thead><tr><th>Date</th><th>Stock</th><th>CE OI</th><th>CE OI chg</th><th>CE act.</th><th>PE OI</th><th>PE OI chg</th><th>PE act.</th><th>PCR</th></tr></thead><tbody>`+
+    (days.length?days.map(x=>`<tr><td>${esc(x.date)}</td><td>${nf(x.undl)}</td><td class="ce">${nf(x.ce_oi)}</td><td>${sg(x.ce_choi)}</td><td>${bu(x.ce_day)}</td>
+      <td class="pe">${nf(x.pe_oi)}</td><td>${sg(x.pe_choi)}</td><td>${bu(x.pe_day)}</td><td>${x.pcr??'--'}</td></tr>`).join(''):'<tr><td colspan="9" class="hl-badge">history loading / not available</td></tr>')+'</tbody>';
+  const sb=d.strikes||[];
+  $('trk-sbuild').innerHTML=`<thead><tr><th>Strike</th><th>Exp</th><th>OI</th><th>OI built ${TRK_HWIN}d</th><th>Streak</th><th>Last days</th><th>ATL/ATH</th></tr></thead><tbody>`+
+    sb.map(x=>`<tr><td class="${x.opt==='CE'?'ce':'pe'}">${x.strike}${x.opt}</td><td>${esc(x.exp.slice(5))}</td><td>${nf(x.oi)}</td><td>${sg(x.oi_chg)}</td><td>${streak(x.oi_streak)}</td>
+      <td>${(x.labels||[]).map(bu).join('')}</td><td>${x.atl??'--'}/${x.ath??'--'}</td></tr>`).join('')+'</tbody>';
+}
+async function renderTrends(){
+  const tr=(await j('/api/tracker/trends?limit=200'+(TRK_TFLT?'&status='+TRK_TFLT:''))).trends||[];
+  const T=t=>t?new Date(t*1000).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'}):'--';
+  $('trk-trends').innerHTML=`<thead><tr><th>Status</th><th>What</th><th>Dir</th><th>Started from</th><th>Confirmed (alert)</th><th>Ended</th><th>Move %</th><th>Best %</th><th>Candles</th><th>Green/Red</th><th>One-sided</th><th>Max pull-back</th><th>Why started / why ended</th></tr></thead><tbody>`+
+    (tr.length?tr.map(t=>`<tr onclick="${t.opt==='STOCK'?`trkChart('', '${esc(t.symbol)}')`:`trkChart('${esc(t.key)}')`}">
+      <td><span class="badge ${t.status==='RUNNING'?'b-NEWS-MATCH':'b-NEWS-AFTER'}">${t.status}</span></td>
+      <td><b>${esc(t.symbol)}</b> ${t.opt==='STOCK'?'stock':`<span class="${t.opt==='CE'?'ce':'pe'}">${t.strike}${t.opt}</span>`}</td>
+      <td class="${t.dir==='UP'?'up':'down'}">${t.dir==='UP'?'▲ UP':'▼ DOWN'}</td>
+      <td>${esc(t.started_time)} @ ${t.origin!=null?(+t.origin).toFixed(2):'--'}</td><td>${esc(t.confirmed_time)} @ ${t.confirm_price}</td>
+      <td>${t.ended_time?esc(t.ended_time)+' @ '+t.end_price:'running'}</td><td>${pc(t.move_pct)}</td><td>${pc(t.best_move_pct)}</td><td>${t.candles}×${t.bar_min}m</td>
+      <td><span class="up">${t.green}</span>/<span class="down">${t.red}</span></td><td>${t.one_sided_pct}%</td><td>${t.max_pullback_pct}%</td>
+      <td style="white-space:normal;min-width:320px;font-size:10px"><b>▶</b> ${esc(t.reason_start)}${t.reason_end?`<br><b>■</b> ${esc(t.reason_end)}`:''}</td></tr>`).join('')
+     :'<tr><td colspan="13" class="hl-badge">No trends yet — they appear once a strike or stock meets every trend rule.</td></tr>')+'</tbody>';
+}
+async function renderHistory(){
+  if(Date.now()-TRK_HT<60000 && TRK_HIST.length) return;
+  TRK_HT=Date.now();
+  const d=await j('/api/tracker/history?window='+TRK_HWIN); TRK_HIST=d.stocks||[];
+  $('trk-hist-st').textContent=d.status||'';
+  $('trk-hist').innerHTML=`<thead><tr><th>Stock</th><th>Stock ${TRK_HWIN}d</th><th>CE OI</th><th>CE OI ${TRK_HWIN===20?20:5}d</th><th>CE OI 20d</th><th>CE streak</th><th>CE same activity</th><th>CE most days (${TRK_HWIN}d)</th>
+    <th>PE OI</th><th>PE OI 5d</th><th>PE OI 20d</th><th>PE streak</th><th>PE same activity</th><th>PE most days (${TRK_HWIN}d)</th><th>PCR</th></tr></thead><tbody>`+
+    TRK_HIST.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b></td><td>${pc(r.undl_chg_pct)}</td>
+      <td class="ce">${nf(r.ce_oi)}</td><td>${pc(r.ce_oi_5d)}</td><td>${pc(r.ce_oi_20d)}</td><td>${streak(r.ce_streak)}</td><td>${bu(r.ce_run)} ${r.ce_run_days}d</td><td>${bu(r.ce_dom)} ${r.ce_dom_days}/${r.window}</td>
+      <td class="pe">${nf(r.pe_oi)}</td><td>${pc(r.pe_oi_5d)}</td><td>${pc(r.pe_oi_20d)}</td><td>${streak(r.pe_streak)}</td><td>${bu(r.pe_run)} ${r.pe_run_days}d</td><td>${bu(r.pe_dom)} ${r.pe_dom_days}/${r.window}</td><td>${r.pcr??'--'}</td></tr>`).join('')+'</tbody>';
 }
 async function renderTracker(){
   const st=await j('/api/tracker/status');
   const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
     ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
-    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
+    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks · `+esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
     ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
-    ['Re-centred', st.last_rebalance||'--', `new strikes today: ${st.new_strikes_today}`],
-    ['Alerts today', st.alerts_today, 'premium / OI / volume'],
+    ['Trends', `${st.trends_running||0} running`, `${st.trends_today||0} today · IV/greeks on ${nf(st.greeks)} strikes`],
+    ['Alerts today', st.alerts_today, `re-centred ${st.last_rebalance||'--'} · new strikes ${st.new_strikes_today}`],
+    ['History · context', st.history?'<span style="font-size:12px">'+esc(st.history)+'</span>':'--', st.context?`F&O ban ${esc(st.context.ban_date||'')}: ${esc((st.context.ban||[]).join(', ')||'none')}`:''],
     ['News', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
    + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
 
   const al=(await j('/api/tracker/alerts?limit=150'+(TRK_FLT?'&status='+TRK_FLT:''))).alerts||[];
-  const kindTxt={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst'};
   $('trk-alerts').innerHTML=al.length?al.map(a=>{
-    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':'pe'}" onclick="trkChart('${esc(l.key)}')">${l.strike}${l.opt} ${a.kind==='VOLUME'?`${nf(l.to)} vs avg ${nf(l.from)} (${l.pct}×)`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}</span>`).join(' · ');
+    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
     const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
+    const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
     return `<div class="trk-alert ${esc(a.status)}">
       <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
-        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-${a.kind==='VOLUME'?'VOLUME':''}">${kindTxt[a.kind]||esc(a.kind)}</span>
-          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b>
-          <span class="hl-badge">${a.dir==='UP'?'▲':'▼'} ${a.max_pct}${a.kind==='VOLUME'?'×':'%'} · spot ${a.spot??'--'} · exp ${esc(a.expiry)}</span></span>
+        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span>
+          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})}
+          <span class="hl-badge">${a.dir==='UP'?'▲':'▼'} ${a.max_pct||''} · spot ${a.spot??'--'}${a.expiry?' · exp '+esc(a.expiry):''}</span></span>
         <span class="hl-badge">${esc(a.time)}</span></div>
-      <div style="margin-top:4px">${legs}</div>
-      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:'<div class="hl-badge" style="margin-top:4px">no news for this stock in the window — re-checked for the next hour</div>'}
+      <div class="why"><b>Why:</b> ${esc(a.reason||'')}</div>${fa}
+      ${legs?`<div style="margin-top:4px">${legs}</div>`:''}
+      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:(a.status==='INFO'?'':'<div class="hl-badge" style="margin-top:4px">no news for this stock in the window — re-checked for the next hour</div>')}
     </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet.</div>`;
 
   const mv=(await j('/api/tracker/board?limit=60&sort='+TRK_MSORT)).rows||[];
-  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>OI</th><th>OI chg%</th></tr></thead><tbody>`+
-    mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
-      <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${nf(r.oi)}</td><td>${pc(r.oi_chg_pct)}</td></tr>`).join('')+'</tbody>';
+  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>Vol/OI</th><th>OI chg%</th><th>Act.</th><th>IV</th></tr></thead><tbody>`+
+    mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')" title="${tip(r)}"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
+      <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${r.vol_oi??'--'}</td><td>${pc(r.oi_chg_pct)}</td><td>${bu(r.buildup)}</td><td>${r.iv??'--'}</td></tr>`).join('')+'</tbody>';
 
   TRK_SUM=(await j('/api/tracker/summary')).stocks||[]; renderSummary();
   const syms=(await j('/api/tracker/symbols')).symbols||[];
+  const first=!TRK_SYM;
   if(!TRK_SYM && syms.length) TRK_SYM=syms.includes('RELIANCE')?'RELIANCE':syms[0];
   if($('trk-sym').options.length!==syms.length) $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join('');
   $('trk-sym').value=TRK_SYM;
-  await renderLadder();
+  await Promise.all([renderLadder(), renderTrends(), renderHistory(), first?renderStockHist():null]);
 }
 // ---- chart: candles + VWAP + volume + OI ----
 $('trk-ch-tf').innerHTML=['1','5','15','60'].map(v=>`<button data-v="${v}" class="${v==='1'?'on':''}">${v}m</button>`).join('');

@@ -344,6 +344,15 @@ class DhanProvider:
         live = sum(1 for s in self.conn_state if s.startswith("connected"))
         return f"Dhan {live}/{self.n_conn} connections · {len(self.key_conn)} subscribed"
 
+    @staticmethod
+    def _depth(raw):
+        """5 levels of <IIHHff (bid_qty, ask_qty, bid_orders, ask_orders, bid_price, ask_price)."""
+        lv = [struct.unpack_from("<IIHHff", raw, i * 20) for i in range(5)]
+        b, a = lv[0][4], lv[0][5]
+        return {"bid": round(b, 2) if b > 0 else None, "ask": round(a, 2) if a > 0 else None,
+                "bid_qty": lv[0][0], "ask_qty": lv[0][1],
+                "depth_bid_qty": sum(x[0] for x in lv), "depth_ask_qty": sum(x[1] for x in lv)}
+
     def parse(self, buf):
         """Parse one WS message (may hold several packets). Returns list of (key, fields)."""
         out, off, n = [], 0, len(buf)
@@ -370,6 +379,7 @@ class DhanProvider:
                 f = {"ltp": u[4], "ltq": u[5], "ltt": u[6], "vwap": u[7], "volume": u[8], "tsq": u[9],
                      "tbq": u[10], "oi": u[11], "oi_hi": u[12], "oi_lo": u[13], "open": u[14],
                      "prev_close": u[15], "high": u[16], "low": u[17]}
+                f.update(self._depth(u[18]))
             elif code == 50:
                 reason = self.DISCONNECT.get(u[4], f"server disconnect code {u[4]}")
                 if u[4] in (806, 807, 808, 809):
@@ -378,7 +388,7 @@ class DhanProvider:
                 continue
             else:
                 continue
-            f = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items()}
+            f = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items() if v is not None}
             out.append((key, f))
             if self.on_data:
                 self.on_data(key, f, now)

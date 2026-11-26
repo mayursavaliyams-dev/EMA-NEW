@@ -203,6 +203,31 @@ def tracker_summary():
     return {"stocks": tracker.summary()}
 
 
+@app.get("/api/tracker/trends")
+def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
+    """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""
+    return {"trends": tracker.trend_list(status or None, symbol or None, limit)}
+
+
+@app.get("/api/tracker/history")
+def tracker_history(window: int = 5):
+    """Multi-day (NSE bhavcopy) OI build per stock: 5/20-day OI change per side, streaks, repeated activity."""
+    h = tracker.hist
+    return {"status": h.status if h else "off", "dates": (h.dates[-1:] if h else []),
+            "stocks": h.stock_table(max(2, min(window, 20))) if h else []}
+
+
+@app.get("/api/tracker/history/stock")
+def tracker_history_stock(symbol: str, days: int = 30, n: int = 5):
+    """Day-by-day record for one stock + strikes where OI was built most over the last n days."""
+    h = tracker.hist
+    if not h:
+        return JSONResponse({"error": "history off"}, status_code=404)
+    sym = symbol.upper()
+    return {"symbol": sym, "days": h.stock_record(sym, max(1, min(days, 120))),
+            "strikes": h.strike_build(sym, max(1, min(n, 20)), 30)}
+
+
 @app.get("/api/tracker/candles")
 def tracker_candles(key: str = "", symbol: str = "", interval: str = "1"):
     """Candles + session VWAP + volume + OI for one strike (key) or the underlying (symbol)."""

@@ -57,6 +57,15 @@ class UpstoxConnector:
                      "oi": v.get("oi"), "oi_hi": v.get("oi_day_high"), "oi_lo": v.get("oi_day_low"),
                      "open": o.get("open"), "high": o.get("high"), "low": o.get("low"),
                      "tbq": v.get("total_buy_quantity"), "tsq": v.get("total_sell_quantity")}
+                dp = v.get("depth") or {}
+                buy, sell = dp.get("buy") or [], dp.get("sell") or []
+                if buy and buy[0].get("price"):
+                    f["bid"], f["bid_qty"] = buy[0]["price"], buy[0].get("quantity")
+                if sell and sell[0].get("price"):
+                    f["ask"], f["ask_qty"] = sell[0]["price"], sell[0].get("quantity")
+                if buy or sell:
+                    f["depth_bid_qty"] = sum(x.get("quantity") or 0 for x in buy)
+                    f["depth_ask_qty"] = sum(x.get("quantity") or 0 for x in sell)
                 ltp, nc = v.get("last_price"), v.get("net_change")
                 if ltp is not None and nc is not None:
                     f["prev_close"] = round(ltp - nc, 2)
