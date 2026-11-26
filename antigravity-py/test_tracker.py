@@ -1,83 +1,32 @@
 """Offline tests for the stock-options side tracker (no token, no network).
 
+Covers: 25,000-strike allocation, live subset, re-centring, intraday new strikes, detectors
+(price / OI / volume, incl. a brute-force check of the O(1) window), news matching, REST merge,
+per-stock totals, VWAP, Dhan binary packets (SDK layout), Dhan 5-connection split, Dhan master
+CSV, and a real WebSocket round-trip against a local fake Dhan feed server.
+
 Run:  py test_tracker.py
 """
 import os
-import tempfile
+import csv
+import json
 import time
+import random
+import struct
+import asyncio
+import tempfile
+import threading
 from datetime import datetime, timedelta
 
 import config
 from trackers import stock_options as T
+from trackers import providers as P
 
-T.ALERTS_PATH = os.path.join(tempfile.mkdtemp(), "alerts.json")   # never touch real data
+TMP = tempfile.mkdtemp()
+T.ALERTS_PATH = os.path.join(TMP, "alerts.json")          # never touch real data
 SET = dict(T.SETTINGS, trkAlwaysOn=True)
 T.setting = lambda k: SET[k]
 IST = T.IST
-
-
-def exp_ms(days):
-    d = (datetime.now(IST) + timedelta(days=days)).replace(hour=23, minute=59, second=59, microsecond=0)
-    return int(d.timestamp() * 1000)
-
-
-def master(n_stocks=218, strikes=30, step=10.0, base=1000.0):
-    rows = []
-    for i in range(n_stocks):
-        sym, ukey = f"STK{i}", f"NSE_EQ|INE{i:06d}"
-        rows.append({"segment": "NSE_EQ", "instrument_key": ukey, "name": f"STOCK {i} LIMITED"})
-        for e in (exp_ms(5), exp_ms(35)):
-            for j in range(strikes):
-                k = base + j * step
-                for opt in ("CE", "PE"):
-                    rows.append({"segment": "NSE_FO", "instrument_type": opt, "underlying_type": "EQUITY",
-                                 "underlying_symbol": sym, "underlying_key": ukey, "expiry": e,
-                                 "strike_price": k, "lot_size": 500,
-                                 "instrument_key": f"NSE_FO|{sym}-{e}-{k:.0f}-{opt}",
-                                 "trading_symbol": f"{sym} {k:.0f} {opt}"})
-    return rows
-
-
-class FakeConn:
-    def __init__(self, spot=1150.0):
-        self.spot = spot
-        self.contract_calls = []
-        self.extra_contracts = []
-        self.q = {}
-
-    def ltp(self, keys):
-        return {k: self.spot for k in keys}
-
-    def quotes(self, keys):
-        return {k: self.q[k] for k in keys if k in self.q}
-
-    def option_contracts(self, ukey):
-        self.contract_calls.append(ukey)
-        return self.extra_contracts
-
-
-class FakeNews:
-    def __init__(self):
-        self.items = {}
-        self.errors = {}
-
-    def poll_nse(self, force=False):
-        pass
-
-    def news_for(self, symbol, name, since_ts=None, until_ts=None, fetch=True):
-        return [i for i in self.items.get(symbol, [])
-                if (since_ts is None or i["ts"] >= since_ts) and (until_ts is None or i["ts"] <= until_ts)]
-
-
-def make(spot=1150.0, **kw):
-    u = T.Universe()
-    u.refresh(rows=master(**kw))
-    c, n = FakeConn(spot), FakeNews()
-    t = T.StockOptionsTracker(c, n, universe=u, detector=T.Detector(get=lambda k: SET[k]))
-    t.alerts.clear()
-    return t, c, n
-
-
 PASS = []
 
 
@@ -87,48 +36,133 @@ def check(name, cond, detail=""):
     print("  ok ", name, detail)
 
 
-def test_budget_5000():
-    t, c, n = make()
+def exp_ms(days):
+    d = (datetime.now(IST) + timedelta(days=days)).replace(hour=15, minute=30, second=0, microsecond=0)
+    return int(d.timestamp() * 1000)
+
+
+def rows(n_stocks=218, strikes=60, step=10.0, base=1000.0):
+    out = []
+    for i in range(n_stocks):
+        sym, uk = f"STK{i}", f"NSE_EQ|{1000 + i}"
+        for e in (exp_ms(5), exp_ms(35)):
+            for j in range(strikes):
+                k = base + j * step
+                for opt in ("CE", "PE"):
+                    out.append({"symbol": sym, "underlying_key": uk, "name": f"STOCK {i} LIMITED", "lot": 500,
+                                "expiry_ms": e, "strike": k, "opt": opt, "key": f"NSE_FNO|{sym}-{e}-{k:.0f}-{opt}",
+                                "ts": f"{sym} {k:.0f} {opt}"})
+    return out
+
+
+class FakeProvider:
+    def __init__(self, name="upstox", limit=5000, spot=1300.0):
+        self.name, self.limit, self.spot = name, limit, spot
+        self.sub, self.contract_calls, self.extra, self.q = set(), [], [], {}
+        self.fatal = None
+
+    def available(self):
+        return True
+
+    def load_rows(self):
+        return rows()
+
+    def spots(self, keys):
+        return {k: self.spot for k in keys}
+
+    def option_contracts(self, stock):
+        self.contract_calls.append(stock["symbol"])
+        return self.extra
+
+    def poll(self, keys):
+        return {k: self.q[k] for k in keys if k in self.q}
+
+    def start_feed(self, on_data, on_status):
+        pass
+
+    def set_subscription(self, keys):
+        keys = set(keys)
+        d = {"added": len(keys - self.sub), "removed": len(self.sub - keys)}
+        self.sub = keys
+        return d
+
+    def status_text(self):
+        return "fake"
+
+    def candles(self, key, interval):
+        return []
+
+
+class FakeNews:
+    def __init__(self):
+        self.items, self.errors = {}, {}
+
+    def poll_nse(self, force=False):
+        pass
+
+    def news_for(self, symbol, name, since_ts=None, until_ts=None, fetch=True):
+        return [i for i in self.items.get(symbol, [])
+                if (since_ts is None or i["ts"] >= since_ts) and (until_ts is None or i["ts"] <= until_ts)]
+
+
+def make(provider=None):
+    p = provider or FakeProvider()
+    n = FakeNews()
+    t = T.StockOptionsTracker(None, n, detector=T.Detector(get=lambda k: SET[k]), providers={"upstox": p})
+    t.alerts.clear()
+    t.choose_provider()
+    t.u.build(p.load_rows())
+    return t, p, n
+
+
+# ---------------------------------------------------------------------------
+def test_25000_allocation():
+    t, p, n = make()
     r = t.rebalance()
     per = {}
     for m in t.sel.values():
         per[m["symbol"]] = per.get(m["symbol"], 0) + 1
     check("218 stocks covered", len(per) == 218, f"({len(per)})")
-    check("<= 5000 instruments", len(t.sel) <= 5000, f"({len(t.sel)})")
-    check("budget nearly filled", len(t.sel) >= 4990, f"({len(t.sel)})")
-    check("11-12 strikes per stock (22-24 legs)", min(per.values()) >= 22 and max(per.values()) <= 24,
-          f"({min(per.values())}-{max(per.values())})")
-    m = next(iter(t.sel.values()))
-    check("front expiry chosen", m["expiry"] == (datetime.now(IST) + timedelta(days=5)).strftime("%Y-%m-%d"))
+    check("25,000 strikes tracked", len(t.sel) == 25000, f"({len(t.sel)})")
+    check("Upstox: 5,000 nearest-ATM streamed live", len(t.live_keys) == 5000 and p.sub == t.live_keys)
+    far = max(t.sel[k]["dist"] for k in t.live_keys)
+    check("live subset = nearest strikes", all(t.sel[k]["dist"] >= far - 1e-12 for k in set(t.sel) - t.live_keys))
+    check("front expiry only", {m["expiry"] for m in t.sel.values()} == {(datetime.now(IST) + timedelta(days=5)).strftime("%Y-%m-%d")})
     strikes = sorted({m["strike"] for m in t.sel.values() if m["symbol"] == "STK0"})
-    check("window centred on ATM", strikes[0] <= 1150 <= strikes[-1] and abs((strikes[0] + strikes[-1]) / 2 - 1150) <= 10,
-          f"({strikes[0]}..{strikes[-1]})")
-    check("returns diff", r["added"] == len(t.sel) and r["removed"] == 0)
+    check("window centred on ATM", strikes[0] <= 1300 <= strikes[-1], f"({strikes[0]}..{strikes[-1]})")
+    t2, p2, _ = make(FakeProvider("dhan", 25000))
+    t2.rebalance()
+    check("Dhan: all 25,000 streamed live", len(t2.live_keys) == 25000 == len(p2.sub))
+    # broker lists fewer front-expiry strikes than the budget (Upstox ~12.6k) -> next expiry fills
+    p3 = FakeProvider()
+    p3.load_rows = lambda: rows(strikes=30)          # 218 x 30 x 2 = 13,080 legs per expiry
+    t3, _, _ = make(p3)
+    t3.rebalance()
+    nf = sum(1 for m in t3.sel.values() if m["front"])
+    check("front expiry fully used, rest from next expiry", nf == 13080 and len(t3.sel) == 25000, f"(front {nf})")
+    check("live subset prefers front expiry", all(t3.sel[k]["front"] for k in t3.live_keys))
+    check("ladder defaults to front expiry", len(t3.board("STK0")) == 60 and len(t3.expiries("STK0")) == 2)
 
 
-def test_recentre_on_spot_move():
-    t, c, n = make()
+def test_recentre_and_new_strikes():
+    t, p, n = make()
     t.rebalance()
-    c.spot = 1200.0
+    p.spot = 1400.0
     r = t.rebalance()
     strikes = sorted({m["strike"] for m in t.sel.values() if m["symbol"] == "STK0"})
-    check("re-centres when spot moves", strikes[0] <= 1200 <= strikes[-1], f"({strikes[0]}..{strikes[-1]})")
-    check("unsub old / sub new diff", r["added"] > 0 and r["removed"] == r["added"], f"(+{r['added']} -{r['removed']})")
-
-
-def test_new_strikes_intraday():
-    # spot runs past the last listed strike -> fetch live contracts -> new strikes join
-    t, c, n = make(spot=1280.0)                 # last listed strike 1290
+    check("re-centres when spot moves", strikes[0] <= 1400 <= strikes[-1] and r["added"] == r["removed"] > 0,
+          f"(+{r['added']} -{r['removed']})")
+    p.spot = 1585.0                                   # last listed strike is 1590
     e = datetime.fromtimestamp(exp_ms(5) / 1000, IST).strftime("%Y-%m-%d")
-    c.extra_contracts = [{"instrument_type": opt, "instrument_key": f"NSE_FO|NEW-{k}-{opt}", "expiry": e,
-                          "strike_price": k, "trading_symbol": f"NEW {k} {opt}"}
-                         for k in (1300.0, 1310.0, 1320.0) for opt in ("CE", "PE")]
+    p.extra = [{"instrument_type": o, "instrument_key": f"NSE_FNO|NEW-{k}-{o}", "expiry": e, "strike_price": k}
+               for k in (1600.0, 1610.0) for o in ("CE", "PE")]
+    p.contract_calls.clear()
+    t._contract_ts.clear()
     t.rebalance()
-    check("edge stocks trigger live contract fetch", len(c.contract_calls) > 0, f"({len(c.contract_calls)} calls)")
-    check("new strikes merged & subscribed", any(k.startswith("NSE_FO|NEW-1300") for k in t.sel))
+    check("edge -> live contract fetch (25 stocks / round)", len(p.contract_calls) == 25)
+    check("new strikes tracked", any(k.startswith("NSE_FNO|NEW-1600") for k in t.sel))
     t.rebalance()
-    check("contract fetch: 25/round, never the same stock twice inside cooldown",
-          len(c.contract_calls) == 50 and len(set(c.contract_calls)) == 50, f"({len(c.contract_calls)})")
+    check("contract fetch cooldown (no stock twice)", len(set(p.contract_calls)) == len(p.contract_calls) == 50)
 
 
 def test_detector():
@@ -137,69 +171,256 @@ def test_detector():
     check("no alert on first tick", d.on_price("A", 10, t0) is None)
     check("no alert on small move", d.on_price("A", 11, t0 + 30) is None)
     ev = d.on_price("A", 12.5, t0 + 60)
-    check("UP spike >=20% in window", ev and ev["dir"] == "UP" and ev["pct"] == 25.0, str(ev and ev["pct"]))
-    check("cooldown blocks repeat", d.on_price("A", 13, t0 + 90) is None)
+    check("PRICE UP >=20% in window", ev and ev["dir"] == "UP" and ev["pct"] == 25.0)
+    check("cooldown", d.on_price("A", 13, t0 + 90) is None)
     d.on_price("B", 1.0, t0)
-    check("cheap option ignored (noise)", d.on_price("B", 1.8, t0 + 30) is None)
+    check("cheap option ignored", d.on_price("B", 1.8, t0 + 30) is None)
     d.on_price("C", 20, t0)
     check("move outside window ignored", d.on_price("C", 26, t0 + 6 * 60) is None)
     d.on_price("D", 50, t0)
-    ev = d.on_price("D", 38, t0 + 60)
-    check("DOWN crash detected", ev and ev["dir"] == "DOWN", str(ev and ev["pct"]))
+    check("PRICE DOWN detected", (d.on_price("D", 38, t0 + 60) or {}).get("dir") == "DOWN")
     d.on_oi("E", 100000, t0, 500)
     check("small OI change ignored", d.on_oi("E", 110000, t0 + 60, 500) is None)
     ev = d.on_oi("E", 150000, t0 + 120, 500)
     check("OI build-up detected", ev and ev["kind"] == "OI" and ev["pct"] == 50.0)
 
+    # monotonic window == brute force on random data
+    rnd = random.Random(7)
+    w, raw = T._Win(), []
+    t = last = t0
+    ok = True
+    for _ in range(3000):
+        t += rnd.choice([0.2, 0.5, 1, 3, 20])
+        v = rnd.uniform(1, 100)
+        w.push(t, v, 300)
+        at = last if raw and t - last < 1 else t        # thinned timestamp
+        last = at
+        raw.append((at, v))
+        cut = at - 300
+        live = [x for x in raw if x[0] >= cut]
+        ok &= abs(w.mn[0][1] - min(x[1] for x in live)) < 1e-9 and abs(w.mx[0][1] - max(x[1] for x in live)) < 1e-9
+    check("O(1) window matches brute force (3000 random ticks)", ok)
+
+
+def test_volume_burst():
+    d = T.Detector(get=lambda k: SET[k])
+    open_ts = T.session_open_ts(time.time())
+    t, vol = open_ts, 0
+    fired = None
+    for i in range(1, 61):                    # first hour from 09:15: steady 100 lots / min
+        vol += 100 * 500
+        check_none = d.on_volume("V", vol, t + i * 60, 500)
+        assert check_none is None, "steady phase must not alert"
+    for i in range(1, 6):                     # burst: 2,000 lots / min
+        vol += 2000 * 500
+        fired = d.on_volume("V", vol, t + 3600 + i * 60, 500) or fired
+    check("VOLUME burst vs day pace", fired and fired["kind"] == "VOLUME" and fired["pct"] >= 5, str(fired and fired["pct"]))
+    d2 = T.Detector(get=lambda k: SET[k])
+    vol = 0
+    quiet = None
+    for i in range(1, 300):                   # a whole steady session
+        vol += 100 * 500
+        quiet = d2.on_volume("W", vol, t + i * 60, 500) or quiet
+    check("steady volume -> no alert", quiet is None)
+
 
 def test_alerts_news_match():
-    t, c, n = make()
+    t, p, n = make()
     t.rebalance()
     keys = [k for k, m in t.sel.items() if m["symbol"] == "STK3" and m["opt"] == "CE"][:2]
     now = time.time()
     n.items["STK3"] = [{"source": "NSE", "ts": now - 600, "title": "Outcome of Board Meeting", "id": "x"}]
     for k in keys:
-        t.on_tick(k, 10, now - 120)
-        t.on_tick(k, 13, now)
+        t.on_data(k, {"ltp": 10}, now - 120)
+        t.on_data(k, {"ltp": 13}, now)
     t._drain_events()
     a = [x for x in t.alerts if x["symbol"] == "STK3"]
-    check("one alert per stock (strikes merged)", len(a) == 1 and len(a[0]["legs"]) == 2, f"({len(a)} alerts)")
+    check("one alert per stock (strikes merged)", len(a) == 1 and len(a[0]["legs"]) == 2)
     check("NEWS-MATCH when news precedes move", a[0]["status"] == "NEWS-MATCH")
-
     key = [k for k, m in t.sel.items() if m["symbol"] == "STK7"][0]
-    t.on_tick(key, 10, now - 60)
-    t.on_tick(key, 15, now)
+    t.on_data(key, {"ltp": 10}, now - 60)
+    t.on_data(key, {"ltp": 15}, now)
     t._drain_events()
     b = [x for x in t.alerts if x["symbol"] == "STK7"][0]
     check("UNEXPLAINED when no news", b["status"] == "UNEXPLAINED")
     n.items["STK7"] = [{"source": "Google News", "ts": now + 300, "title": "STK7 wins order", "id": "y"}]
     t.recheck_unexplained(now=now + 400)
-    check("upgraded to NEWS-AFTER when news lands later", b["status"] == "NEWS-AFTER")
+    check("upgraded to NEWS-AFTER", b["status"] == "NEWS-AFTER")
 
 
-def test_quote_poll_oi():
-    t, c, n = make()
+def test_rest_merge_summary_ladder():
+    t, p, n = make()
     t.rebalance()
-    k = next(iter(t.sel))
-    c.q = {k: {"ltp": 20, "oi": 100000, "volume": 10}}
-    t.poll_quotes()
-    c.q = {k: {"ltp": 20, "oi": 200000, "volume": 50}}
-    t.poll_quotes()
-    t._drain_events()
-    check("OI alert from REST poll", any(a["kind"] == "OI" for a in t.alerts))
-    check("board shows the strike ladder", len(t.board(t.sel[k]["symbol"])) >= 22)
+    live_k = next(iter(t.live_keys))
+    rest_k = next(iter(set(t.sel) - t.live_keys))
+    t.on_data(live_k, {"ltp": 50.0})                       # WS tick
+    p.q = {live_k: {"ltp": 1.0, "oi": 1000, "volume": 10},
+           rest_k: {"ltp": 20.0, "vwap": 19.0, "high": 25.0, "low": 15.0, "oi": 100000, "prev_oi": 80000,
+                    "prev_close": 16.0, "volume": 5000, "oi_hi": 120000, "oi_lo": 70000}}
+    t.poll_rest()
+    check("WS price wins for live strikes", t.latest[live_k]["ltp"] == 50.0 and t.latest[live_k]["oi"] == 1000)
+    check("REST fills OI/VWAP/high-low for the rest", t.latest[rest_k]["vwap"] == 19.0)
+    m = t.sel[rest_k]
+    row = [r for r in t.board(m["symbol"]) if r["key"] == rest_k][0]
+    check("ladder: above VWAP, range pos, OI chg, day chg",
+          row["above_vwap"] is True and row["range_pos"] == 50 and row["oi_chg"] == 20000 and row["chg_pct"] == 25.0)
+    # totals / mapping
+    t2, p2, _ = make()
+    t2.rebalance()
+    sk = {(m["strike"], m["opt"]): k for k, m in t2.sel.items() if m["symbol"] == "STK1"}
+    t2.on_data(sk[(1350.0, "CE")], {"oi": 9000, "prev_oi": 4000, "volume": 700})
+    t2.on_data(sk[(1300.0, "CE")], {"oi": 1000, "volume": 100})
+    t2.on_data(sk[(1250.0, "PE")], {"oi": 18000, "volume": 50})
+    s = [x for x in t2.summary() if x["symbol"] == "STK1"][0]
+    check("totals: CE/PE OI, PCR, OI chg", s["ce_oi"] == 10000 and s["pe_oi"] == 18000 and s["pcr"] == 1.8 and s["ce_oi_chg"] == 5000)
+    check("mapping: resistance / support / max-volume strike",
+          s["resistance"] == 1350.0 and s["support"] == 1250.0 and s["max_vol_strike"] == "1350CE")
+
+
+def test_vwap():
+    base = int(datetime(2026, 11, 26, 9, 15, tzinfo=IST).timestamp())
+    c = P.vwap_series([{"time": base, "high": 12, "low": 8, "close": 10, "volume": 100},
+                       {"time": base + 60, "high": 22, "low": 18, "close": 20, "volume": 300},
+                       {"time": base + 86400, "high": 6, "low": 4, "close": 5, "volume": 10}])
+    check("VWAP cumulative within day", c[1]["vwap"] == 17.5)
+    check("VWAP resets next day", c[2]["vwap"] == 5.0)
+
+
+# ---------------------------------------------------------------------------
+# Dhan
+# ---------------------------------------------------------------------------
+def full_pkt(sid, ltp=12.5, vol=1000, oi=5000, seg=2):
+    body = struct.pack("<BHBIfHIfIIIIIIffff", 8, 162, seg, sid, ltp, 75, 1764140000, ltp - 0.5, vol, 300, 400,
+                       oi, oi + 100, oi - 100, 11.0, 10.0, 14.0, 9.0)
+    return body + b"\0" * 100
+
+
+def test_dhan_packets():
+    d = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    msg = (full_pkt(101) + struct.pack("<BHBIfI", 6, 16, 2, 102, 33.5, 7000)
+           + struct.pack("<BHBII", 5, 12, 2, 103, 4242) + struct.pack("<BHBIfI", 2, 16, 2, 104, 7.25, 1764140000))
+    out = dict(d.parse(msg))
+    f = out["NSE_FNO|101"]
+    check("FULL packet: ltp/vwap/volume/OI/OI hi-lo/OHLC",
+          (f["ltp"], f["vwap"], f["volume"], f["oi"], f["oi_hi"], f["oi_lo"], f["open"], f["prev_close"], f["high"], f["low"], f["tbq"], f["tsq"])
+          == (12.5, 12.0, 1000, 5000, 5100, 4900, 11.0, 10.0, 14.0, 9.0, 400, 300))
+    check("PREV CLOSE packet -> prev OI", out["NSE_FNO|102"] == {"prev_close": 33.5, "prev_oi": 7000})
+    check("OI + TICKER packets in the same message", out["NSE_FNO|103"] == {"oi": 4242} and out["NSE_FNO|104"]["ltp"] == 7.25)
+    d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
+    check("disconnect 807 -> token expired -> provider stops", d.fatal and "expired" in d.fatal and not d.available())
+
+
+def test_dhan_split():
+    d = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    keys = {f"NSE_FNO|{i}" for i in range(25000)}
+    r = d.set_subscription(keys)
+    sizes = [len(s) for s in d.conn_keys]
+    check("25,000 over 5 connections x 5000", r["added"] == 25000 and sizes == [5000] * 5, str(sizes))
+    keys2 = (keys - {f"NSE_FNO|{i}" for i in range(300)}) | {f"NSE_FNO|{i}" for i in range(30000, 30300)}
+    r = d.set_subscription(keys2)
+    check("diff: only changed strikes unsub/sub, still <=5000 each",
+          r == {"added": 300, "removed": 300} and max(len(s) for s in d.conn_keys) <= 5000)
+    msgs = [json.loads(m) for m in d._msgs(21, sorted(keys)[:250])]
+    check("subscribe batches of 100 (RequestCode 21)", [m["InstrumentCount"] for m in msgs] == [100, 100, 50]
+          and msgs[0]["RequestCode"] == 21 and msgs[0]["InstrumentList"][0]["ExchangeSegment"] == "NSE_FNO")
+
+
+def test_dhan_master_csv():
+    path = os.path.join(TMP, "dhan.csv")
+    cols = ["EXCH_ID", "SEGMENT", "SECURITY_ID", "INSTRUMENT", "UNDERLYING_SECURITY_ID", "UNDERLYING_SYMBOL",
+            "SYMBOL_NAME", "DISPLAY_NAME", "LOT_SIZE", "SM_EXPIRY_DATE", "STRIKE_PRICE", "OPTION_TYPE"]
+    e = (datetime.now(IST) + timedelta(days=10)).strftime("%Y-%m-%d")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        w.writerow(["NSE", "E", "2885", "EQUITY", "", "RELIANCE", "RELIANCE INDUSTRIES LTD", "Reliance", "1.0", "", "", ""])
+        w.writerow(["NSE", "D", "50001", "OPTSTK", "2885", "RELIANCE", "R-CE", "RELIANCE 1300 CALL", "500.0", e, "1300.00000", "CE"])
+        w.writerow(["NSE", "D", "50002", "OPTIDX", "13", "NIFTY", "N", "NIFTY", "65.0", e, "26000", "CE"])
+        w.writerow(["BSE", "D", "60001", "OPTSTK", "500325", "RELIANCE", "R", "R", "500.0", e, "1300", "PE"])
+    r = P.DhanProvider(creds={"client_id": "1", "access_token": "x"}).load_rows(path)
+    check("Dhan master: NSE OPTSTK only, keys/underlying/name/lot",
+          len(r) == 1 and r[0]["key"] == "NSE_FNO|50001" and r[0]["underlying_key"] == "NSE_EQ|2885"
+          and r[0]["name"] == "RELIANCE INDUSTRIES LTD" and r[0]["lot"] == 500 and r[0]["strike"] == 1300.0)
+
+
+def test_dhan_websocket_roundtrip():
+    """Real WebSocket: provider connects to a local fake Dhan feed, subscribes, receives FULL packets."""
+    import websockets
+    got_subs, got_q = [], []
+    port_box = {}
+
+    async def handler(ws):
+        got_q.append(ws.request.path)
+        async for m in ws:
+            j = json.loads(m)
+            got_subs.append(j)
+            if j["RequestCode"] == 21:
+                await ws.send(b"".join(full_pkt(int(x["SecurityId"]), ltp=20.0 + i) for i, x in enumerate(j["InstrumentList"][:3])))
+
+    async def serve(ready):
+        async with websockets.serve(handler, "127.0.0.1", 0) as srv:
+            port_box["p"] = srv.sockets[0].getsockname()[1]
+            ready.set()
+            await asyncio.sleep(8)
+
+    ready = threading.Event()
+    threading.Thread(target=lambda: asyncio.run(serve(ready)), daemon=True).start()
+    ready.wait(5)
+    d = P.DhanProvider(connections=2, creds={"client_id": "1100", "access_token": "tok"},
+                       wss=f"ws://127.0.0.1:{port_box['p']}")
+    data = {}
+    d.start_feed(lambda k, f, ts: data.__setitem__(k, f), lambda s: None)
+    time.sleep(0.3)
+    d.set_subscription({f"NSE_FNO|{i}" for i in range(1, 251)})
+    for _ in range(50):
+        if len(data) >= 6:
+            break
+        time.sleep(0.1)
+    check("WS auth in URL (version=2, token, clientId, authType=2)",
+          any("version=2" in q and "token=tok" in q and "clientId=1100" in q and "authType=2" in q for q in got_q))
+    check("2 connections opened, 250 strikes subscribed in batches", len(got_q) == 2
+          and sum(s["InstrumentCount"] for s in got_subs if s["RequestCode"] == 21) == 250
+          and max(s["InstrumentCount"] for s in got_subs) <= 100)
+    check("FULL packets parsed from the socket", len(data) >= 6 and all("oi" in f and "vwap" in f for f in data.values()),
+          f"({len(data)} strikes)")
+    d.set_subscription({f"NSE_FNO|{i}" for i in range(1, 241)})
+    time.sleep(0.5)
+    unsub = [s for s in got_subs if s["RequestCode"] == 22]
+    check("live unsubscribe (RequestCode 22)", sum(s["InstrumentCount"] for s in unsub) == 10)
 
 
 def test_news_relevance():
     from trackers.news import is_relevant, clean_name
     check("clean_name drops LIMITED", clean_name("RELIANCE INDUSTRIES LIMITED") == "Reliance Industries")
-    check("headline about stock is relevant", is_relevant("Reliance shares jump 3%", "RELIANCE", "RELIANCE INDUSTRIES LTD"))
+    check("relevant headline", is_relevant("Reliance shares jump 3%", "RELIANCE", "RELIANCE INDUSTRIES LTD"))
     check("generic headline rejected", not is_relevant("Industries see slow growth", "RELIANCE", "RELIANCE INDUSTRIES LTD"))
 
 
+def test_speed():
+    t, p, n = make(FakeProvider("dhan", 25000))
+    t.rebalance()
+    keys = list(t.sel)
+    rnd = random.Random(1)
+    t0 = time.perf_counter()
+    now = time.time()
+    N = 200_000
+    for i in range(N):
+        k = keys[i % 25000]
+        t.on_data(k, {"ltp": 50 + rnd.random(), "oi": 10000 + i % 7, "volume": 1000 + i}, now + i * 0.005)
+    dt = time.perf_counter() - t0
+    check("throughput >= 20,000 updates/sec", N / dt >= 20000, f"({N / dt:,.0f}/s)")
+    t0 = time.perf_counter()
+    t.summary()
+    t.board(None, 60, "move")
+    check("summary + movers over 25,000 strikes < 1 s", time.perf_counter() - t0 < 1.0,
+          f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
+
+
 if __name__ == "__main__":
-    for fn in [test_budget_5000, test_recentre_on_spot_move, test_new_strikes_intraday, test_detector,
-               test_alerts_news_match, test_quote_poll_oi, test_news_relevance]:
+    for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
+               test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
+               test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
+               test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

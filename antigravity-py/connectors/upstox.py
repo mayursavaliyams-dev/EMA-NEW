@@ -1,4 +1,5 @@
 """Upstox connector (REST via httpx). Live data; paper order stub."""
+import time
 import urllib.parse
 from datetime import datetime, timedelta
 import httpx
@@ -35,21 +36,31 @@ class UpstoxConnector:
             out[v.get("instrument_token")] = v.get("last_price")
         return out
 
-    def quotes(self, instrument_keys):
-        """Full market quote (LTP + OI + volume) for up to 500 keys per call.
-        Returns {instrument_key: {"ltp", "oi", "volume"}}."""
+    def quotes(self, instrument_keys, pace=0.25):
+        """Full market quote for up to 500 keys per call (paced). Returns
+        {instrument_key: {ltp, vwap, volume, oi, oi_hi, oi_lo, open, high, low, prev_close, tbq, tsq}}."""
         out = {}
         keys = list(instrument_keys)
         for i in range(0, len(keys), 500):
+            if i:
+                time.sleep(pace)
             q = urllib.parse.quote(",".join(keys[i:i + 500]), safe=",")
             r = self._client.get(f"/v2/market-quote/quotes?instrument_key={q}", headers=self._h())
             if r.status_code != 200:
                 raise RuntimeError(f"quotes HTTP {r.status_code}: {r.text[:200]}")
             for _, v in (r.json().get("data", {}) or {}).items():
                 k = v.get("instrument_token")
-                if k:
-                    out[k] = {"ltp": v.get("last_price"), "oi": v.get("oi"),
-                              "volume": v.get("volume")}
+                if not k:
+                    continue
+                o = v.get("ohlc") or {}
+                f = {"ltp": v.get("last_price"), "vwap": v.get("average_price"), "volume": v.get("volume"),
+                     "oi": v.get("oi"), "oi_hi": v.get("oi_day_high"), "oi_lo": v.get("oi_day_low"),
+                     "open": o.get("open"), "high": o.get("high"), "low": o.get("low"),
+                     "tbq": v.get("total_buy_quantity"), "tsq": v.get("total_sell_quantity")}
+                ltp, nc = v.get("last_price"), v.get("net_change")
+                if ltp is not None and nc is not None:
+                    f["prev_close"] = round(ltp - nc, 2)
+                out[k] = {a: b for a, b in f.items() if b is not None}
         return out
 
     def option_contracts(self, underlying_key):

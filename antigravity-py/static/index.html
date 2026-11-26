@@ -88,8 +88,19 @@
   .trk-set input{width:70px;background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;padding:2px 4px;font-family:var(--mono)}
   .flt button{background:transparent;border:1px solid var(--bd);color:var(--mut);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px}
   .flt button.on{color:var(--buy);border-color:var(--buy)}
-  #trk-ladder td,#trk-movers td{padding:2px 5px}
-  #trk-movers tbody tr{cursor:pointer}
+  #trk-ladder td,#trk-movers td,#trk-sum td{padding:2px 5px;white-space:nowrap}
+  #trk-movers tbody tr,#trk-sum tbody tr,#trk-ladder td.ck{cursor:pointer}
+  #trk-sum th{cursor:pointer;position:sticky;top:0;background:var(--card)} #trk-ladder th,#trk-movers th{position:sticky;top:0;background:var(--card)}
+  #trk-sum tbody tr:hover td,#trk-movers tbody tr:hover td{background:rgba(41,98,255,.08)}
+  #trk-ladder td.ck:hover{outline:1px solid var(--warn)}
+  .trk-sel{background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px}
+  .rng{display:inline-block;width:46px;height:6px;background:rgba(255,255,255,.08);border-radius:3px;position:relative;vertical-align:middle}
+  .rng i{position:absolute;top:-2px;width:3px;height:10px;background:var(--warn);border-radius:1px}
+  .vw-up{color:var(--buy);font-weight:700} .vw-dn{color:var(--sell);font-weight:700}
+  .trk-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;align-items:center;justify-content:center}
+  .trk-modal.show{display:flex}
+  .trk-modal-box{background:var(--card);border:1px solid var(--bd);border-radius:8px;width:min(1200px,96vw);height:min(760px,90vh);display:flex;flex-direction:column}
+  .b-VOLUME{background:rgba(255,214,10,.12);color:var(--warn)}
 </style>
 </head>
 <body>
@@ -150,32 +161,45 @@
 </div><!-- /tab-trading -->
 
 <div id="tab-tracker" style="display:none">
-  <div style="padding:8px 14px 0;font-size:11px;color:var(--mut)">Side tracker · 5000 CE/PE strikes across all F&amp;O stocks (ATM ±N, auto re-centred, new strikes auto-added) · matched to NSE filings + Google News · <b style="color:var(--warn)">display only — never places orders</b></div>
+  <div style="padding:8px 14px 0;font-size:11px;color:var(--mut)">Side tracker · up to 25,000 CE/PE strikes across all F&amp;O stocks (ATM-nearest, auto re-centred, new strikes auto-added) · OI · VWAP · volume · high/low · matched to NSE filings + Google News · <b style="color:var(--warn)">display only — never places orders</b></div>
   <div class="cards" id="trk-cards"></div>
   <div class="trk-grid">
     <div class="panel">
-      <div class="ph"><span>🚨 Alerts — option spike vs news</span>
-        <span class="flt" id="trk-flt"></span></div>
-      <div id="trk-alerts" style="padding:8px;max-height:62vh;overflow:auto"></div>
+      <div class="ph"><span>🚨 Alerts — premium / OI / volume spike vs news</span><span class="flt" id="trk-flt"></span></div>
+      <div id="trk-alerts" style="padding:8px;max-height:58vh;overflow:auto"></div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:8px">
-      <div class="panel">
-        <div class="ph"><span>📈 Top movers (within spike window)</span><span class="hl-badge">click a row → ladder</span></div>
-        <div style="max-height:26vh;overflow:auto"><table id="trk-movers"></table></div>
-      </div>
-      <div class="panel">
-        <div class="ph"><span>Strike ladder</span>
-          <select id="trk-sym" style="background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px"></select></div>
-        <div style="max-height:30vh;overflow:auto"><table id="trk-ladder"></table></div>
-        <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
-        <div class="trk-news" id="trk-news" style="padding:4px 10px;max-height:22vh;overflow:auto"></div>
-      </div>
+    <div class="panel">
+      <div class="ph"><span>📈 Top strikes</span><span class="flt" id="trk-msort"></span></div>
+      <div style="max-height:58vh;overflow:auto"><table id="trk-movers"></table></div>
     </div>
+  </div>
+  <div class="panel" style="margin:0 12px 8px">
+    <div class="ph"><span>📊 All F&amp;O stocks — totals &amp; OI mapping (front expiry)</span>
+      <span style="display:flex;gap:6px;align-items:center"><input id="trk-find" placeholder="search…" style="background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px;padding:2px 6px;width:110px">
+      <span class="hl-badge">click a header to sort · a row → ladder</span></span></div>
+    <div style="max-height:34vh;overflow:auto"><table id="trk-sum"></table></div>
+  </div>
+  <div class="panel" style="margin:0 12px 8px">
+    <div class="ph"><span id="trk-lad-title">Strike ladder</span>
+      <span style="display:flex;gap:6px;align-items:center">
+        <select id="trk-sym" class="trk-sel"></select><select id="trk-exp" class="trk-sel"></select>
+        <button class="tg" onclick="trkChart('', TRK_SYM)">📈 Stock chart</button></span></div>
+    <div style="max-height:52vh;overflow:auto"><table id="trk-ladder"></table></div>
+    <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
+    <div class="trk-news" id="trk-news" style="padding:4px 10px;max-height:22vh;overflow:auto"></div>
   </div>
   <div class="panel" style="margin:0 12px 16px">
     <div class="ph"><span>⚙️ Settings</span><button class="tg" onclick="trkSave()">Save</button></div>
     <div class="trk-set" id="trk-set"></div>
     <div id="trk-set-msg" style="padding:0 10px 8px;font-size:11px;color:var(--mut)"></div>
+  </div>
+</div>
+<div id="trk-modal" class="trk-modal" onclick="if(event.target===this)trkClose()">
+  <div class="trk-modal-box">
+    <div class="ph"><span id="trk-ch-title">Chart</span>
+      <span style="display:flex;gap:6px;align-items:center"><span class="tf" id="trk-ch-tf"></span><button class="tg" onclick="trkClose()">✕</button></span></div>
+    <div id="trk-ch-info" class="hl-badge" style="padding:4px 10px"></div>
+    <div id="trk-ch" style="flex:1;min-height:0"></div>
   </div>
 </div>
 
@@ -534,70 +558,141 @@ async function renderAnalysis(){
 // ---- Stock-options side tracker ----
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeUrl=u=>/^https?:\/\//i.test(u||'')?esc(u):'#';
-let TRK_FLT='', TRK_SYM='';
-const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkBudget:'Strikes (max 5000)',trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',
-  trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
-  trkMinOiLots:'Min OI lots',trkCooldownMin:'Cooldown (min)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',
-  trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'OI poll (sec)',trkAlwaysOn:'Run off-hours'};
-$('trk-flt').innerHTML=[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after']]
-  .map(([v,l])=>`<button data-v="${v}" class="${v===''?'on':''}" onclick="TRK_FLT='${v}';document.querySelectorAll('#trk-flt button').forEach(b=>b.classList.toggle('on',b.dataset.v===TRK_FLT));renderTracker()">${l}</button>`).join(' ');
+const nf=v=>v==null?'--':Number(v).toLocaleString('en-IN');
+const sg=v=>v==null?'--':`<span class="${v>=0?'up':'down'}">${v>0?'+':''}${typeof v==='number'?v.toLocaleString('en-IN'):v}</span>`;
+const pc=v=>v==null?'--':`<span class="${v>=0?'up':'down'}">${v>0?'+':''}${v}%</span>`;
+let TRK_FLT='', TRK_SYM='', TRK_EXP='', TRK_MSORT='move', TRK_SORT='vol', TRK_DESC=true, TRK_SUM=[], TRK_CH=null, TRK_CHK={key:'',sym:'',iv:'1'};
+const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan/upstox)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
+  trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
+  trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkCooldownMin:'Cooldown (min)',
+  trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
+const flt=(id,items,cur,fn)=>{$(id).innerHTML=items.map(([v,l])=>`<button data-v="${v}" class="${v===cur?'on':''}">${l}</button>`).join(' ');
+  $(id).querySelectorAll('button').forEach(b=>b.onclick=()=>{$(id).querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));fn(b.dataset.v);});};
+flt('trk-flt',[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after']],'',v=>{TRK_FLT=v;renderTracker();});
+flt('trk-msort',[['move','Price move'],['volume','Volume now'],['oi','OI change']],'move',v=>{TRK_MSORT=v;renderTracker();});
 async function trkSettings(){
   const st=await j('/api/tracker/settings');
   $('trk-set').innerHTML=Object.entries(st).map(([k,v])=>typeof v==='boolean'
     ? `<label>${TRK_LBL[k]||k}<input type="checkbox" data-k="${k}" ${v?'checked':''} style="width:auto"></label>`
+    : k==='trkProvider' ? `<label>${TRK_LBL[k]}<select data-k="${k}" class="trk-sel">${['auto','dhan','upstox'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')}</select></label>`
     : `<label>${TRK_LBL[k]||k}<input type="number" step="any" min="0" data-k="${k}" value="${esc(v)}"></label>`).join('');
 }
 async function trkSave(){
-  const body={}; document.querySelectorAll('#trk-set input').forEach(i=>body[i.dataset.k]=i.type==='checkbox'?i.checked:Number(i.value));
+  const body={}; document.querySelectorAll('#trk-set [data-k]').forEach(i=>body[i.dataset.k]=i.type==='checkbox'?i.checked:(i.tagName==='SELECT'?i.value:Number(i.value)));
   const r=await fetch('/api/tracker/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   $('trk-set-msg').textContent=r.error?('❌ '+r.error):('✅ saved '+new Date().toLocaleTimeString()); trkSettings();
 }
-function trkPickSym(s){ TRK_SYM=s; $('trk-sym').value=s; renderTracker(); }
+function trkPickSym(s){ if(s!==TRK_SYM){TRK_SYM=s; TRK_EXP='';} $('trk-sym').value=s; renderLadder(); }
 $('trk-sym').onchange=e=>trkPickSym(e.target.value);
+$('trk-exp').onchange=e=>{TRK_EXP=e.target.value; renderLadder();};
+$('trk-find').oninput=()=>renderSummary();
+function renderSummary(){
+  const f=($('trk-find').value||'').toUpperCase();
+  const cols=[['symbol','Stock'],['spot','Spot'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['pe_oi_chg','PE OI chg'],
+    ['vol','Volume'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],['strikes','Strikes'],['alerts','Alerts']];
+  const rows=TRK_SUM.filter(r=>!f||r.symbol.includes(f)).map(r=>({...r,vol:r.ce_vol+r.pe_vol}));
+  rows.sort((a,b)=>{const x=a[TRK_SORT],y=b[TRK_SORT];const c=(typeof x==='string'||typeof y==='string')?String(x??'').localeCompare(String(y??'')):(x??-1e18)-(y??-1e18);return TRK_DESC?-c:c;});
+  $('trk-sum').innerHTML=`<thead><tr>${cols.map(([k,l])=>`<th onclick="TRK_DESC=TRK_SORT===\'${k}\'?!TRK_DESC:true;TRK_SORT=\'${k}\';renderSummary()">${l}${TRK_SORT===k?(TRK_DESC?' ▼':' ▲'):''}</th>`).join('')}</tr></thead><tbody>`+
+    rows.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b></td><td>${nf(r.spot)}</td><td class="ce">${nf(r.ce_oi)}</td><td class="pe">${nf(r.pe_oi)}</td>
+      <td>${r.pcr??'--'}</td><td>${sg(r.ce_oi_chg)}</td><td>${sg(r.pe_oi_chg)}</td><td>${nf(r.vol)}</td><td class="pe">${r.resistance??'--'}</td><td class="ce">${r.support??'--'}</td>
+      <td>${esc(r.max_vol_strike??'--')}</td><td>${r.strikes}</td><td>${r.alerts?`<b style="color:var(--warn)">${r.alerts}</b>`:0}</td></tr>`).join('')+'</tbody>';
+}
+function rngBar(r){ if(r.range_pos==null) return '--'; return `<span class="rng" title="day low ${r.low} · high ${r.high}"><i style="left:${Math.max(0,Math.min(100,r.range_pos))*0.43}px"></i></span>`; }
+async function renderLadder(){
+  if(!TRK_SYM) return;
+  const d=await j('/api/tracker/board?symbol='+encodeURIComponent(TRK_SYM)+(TRK_EXP?'&expiry='+TRK_EXP:''));
+  const ex=d.expiries||[]; if(!TRK_EXP) TRK_EXP=ex[0]||'';
+  $('trk-exp').innerHTML=ex.map(e=>`<option ${e===TRK_EXP?'selected':''}>${e}</option>`).join('');
+  const rows=d.rows||[]; const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
+  const atm=rows[0]?.atm, spot=rows[0]?.spot;
+  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">click a CE/PE price → chart · ● live tick · VWAP green = LTP above VWAP</span>`;
+  const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="8">--</td>';
+    const vw=r.vwap!=null?`<span class="${r.above_vwap?'vw-up':'vw-dn'}">${r.vwap}</span>`:'--';
+    const ltp=`<td class="ck ${side}" onclick="trkChart('${r.key}')">${r.live?'● ':''}${r.ltp??'--'}</td>`;
+    const c=[`<td>${nf(r.oi)}</td>`,`<td>${sg(r.oi_chg)}</td>`,`<td>${nf(r.volume)}</td>`,`<td>${pc(r.chg_pct)}</td>`,`<td>${vw}</td>`,`<td>${r.low??'--'}/${r.high??'--'}</td>`,`<td>${rngBar(r)}</td>`,ltp];
+    return side==='ce'?c.join(''):c.reverse().join(''); };
+  $('trk-ladder').innerHTML=`<thead><tr><th>CE OI</th><th>OI chg</th><th>Vol</th><th>Chg%</th><th>VWAP</th><th>Low/High</th><th>Range</th><th>CE LTP</th><th>Strike</th>
+    <th>PE LTP</th><th>Range</th><th>Low/High</th><th>VWAP</th><th>Chg%</th><th>Vol</th><th>OI chg</th><th>PE OI</th></tr></thead><tbody>`+
+    Object.keys(by).map(Number).sort((a,b)=>a-b).map(k=>`<tr class="${k===atm?'atm':''}">${cell(by[k].CE,'ce')}<td class="strike">${k}</td>${cell(by[k].PE,'pe')}</tr>`).join('')+'</tbody>';
+  const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
+  $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
+}
 async function renderTracker(){
   const st=await j('/api/tracker/status');
+  const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
-    ['Tracked strikes', `${st.instruments_tracked} / ${st.budget}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
-    ['Feed', `<span style="font-size:12px">${esc(st.ws)}</span>`, `${st.ws_ticks} ticks · ${st.quote_polls} OI polls (last ${st.last_quote||'--'})`],
-    ['Re-centred', st.last_rebalance||'--', `new strikes added today: ${st.new_strikes_today}`],
-    ['Alerts today', st.alerts_today, 'price spike / OI change'],
-    ['News sources', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
+    ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
+    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
+    ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
+    ['Re-centred', st.last_rebalance||'--', `new strikes today: ${st.new_strikes_today}`],
+    ['Alerts today', st.alerts_today, 'premium / OI / volume'],
+    ['News', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
    + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
 
   const al=(await j('/api/tracker/alerts?limit=150'+(TRK_FLT?'&status='+TRK_FLT:''))).alerts||[];
+  const kindTxt={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst'};
   $('trk-alerts').innerHTML=al.length?al.map(a=>{
-    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px" class="${l.opt==='CE'?'ce':'pe'}">${l.strike}${l.opt} ${l.from}→${l.to} (${l.pct>0?'+':''}${l.pct}%)</span>`).join(' · ');
+    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':'pe'}" onclick="trkChart('${esc(l.key)}')">${l.strike}${l.opt} ${a.kind==='VOLUME'?`${nf(l.to)} vs avg ${nf(l.from)} (${l.pct}×)`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}</span>`).join(' · ');
     const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
     return `<div class="trk-alert ${esc(a.status)}">
       <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
-        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b>
-          <span class="hl-badge">${a.kind==='OI'?'OI':'Premium'} ${a.dir==='UP'?'▲':'▼'} ${a.max_pct}% · spot ${a.spot??'--'} · exp ${esc(a.expiry)}</span></span>
+        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-${a.kind==='VOLUME'?'VOLUME':''}">${kindTxt[a.kind]||esc(a.kind)}</span>
+          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b>
+          <span class="hl-badge">${a.dir==='UP'?'▲':'▼'} ${a.max_pct}${a.kind==='VOLUME'?'×':'%'} · spot ${a.spot??'--'} · exp ${esc(a.expiry)}</span></span>
         <span class="hl-badge">${esc(a.time)}</span></div>
       <div style="margin-top:4px">${legs}</div>
-      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:'<div class="hl-badge" style="margin-top:4px">no news found for this stock in the window — re-checked for the next '+'hour</div>'}
-    </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet. Alerts appear when an option's premium moves ≥ spike % inside the window, or OI changes sharply.</div>`;
+      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:'<div class="hl-badge" style="margin-top:4px">no news for this stock in the window — re-checked for the next hour</div>'}
+    </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet.</div>`;
 
-  const mv=(await j('/api/tracker/board?limit=40')).rows||[];
-  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>Chg%</th><th>OI</th></tr></thead><tbody>`+
-    mv.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}</td><td>${r.ltp??'--'}</td>
-      <td class="${r.chg_win_pct>=0?'up':'down'}">${r.chg_win_pct}%</td><td>${r.oi!=null?Number(r.oi).toLocaleString('en-IN'):'--'}</td></tr>`).join('')+'</tbody>';
+  const mv=(await j('/api/tracker/board?limit=60&sort='+TRK_MSORT)).rows||[];
+  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>OI</th><th>OI chg%</th></tr></thead><tbody>`+
+    mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
+      <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${nf(r.oi)}</td><td>${pc(r.oi_chg_pct)}</td></tr>`).join('')+'</tbody>';
 
+  TRK_SUM=(await j('/api/tracker/summary')).stocks||[]; renderSummary();
   const syms=(await j('/api/tracker/symbols')).symbols||[];
   if(!TRK_SYM && syms.length) TRK_SYM=syms.includes('RELIANCE')?'RELIANCE':syms[0];
   if($('trk-sym').options.length!==syms.length) $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join('');
   $('trk-sym').value=TRK_SYM;
-  if(TRK_SYM){
-    const rows=(await j('/api/tracker/board?symbol='+encodeURIComponent(TRK_SYM))).rows||[];
-    const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
-    const atm=rows[0]?.atm;
-    $('trk-ladder').innerHTML=`<thead><tr><th>CE OI</th><th>CE LTP</th><th>CE Δ%</th><th>Strike</th><th>PE Δ%</th><th>PE LTP</th><th>PE OI</th></tr></thead><tbody>`+
-      Object.keys(by).map(Number).sort((a,b)=>a-b).map(k=>{const c=by[k].CE||{},p=by[k].PE||{};
-        const f=v=>v!=null?Number(v).toLocaleString('en-IN'):'--', d=v=>v!=null?`<span class="${v>=0?'up':'down'}">${v}%</span>`:'--';
-        return `<tr class="${k===atm?'atm':''}"><td>${f(c.oi)}</td><td class="ce">${c.ltp??'--'}</td><td>${d(c.chg_win_pct)}</td><td class="strike">${k}</td><td>${d(p.chg_win_pct)}</td><td class="pe">${p.ltp??'--'}</td><td>${f(p.oi)}</td></tr>`}).join('')+'</tbody>';
-    const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
-    $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
-  }
+  await renderLadder();
+}
+// ---- chart: candles + VWAP + volume + OI ----
+$('trk-ch-tf').innerHTML=['1','5','15','60'].map(v=>`<button data-v="${v}" class="${v==='1'?'on':''}">${v}m</button>`).join('');
+$('trk-ch-tf').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('trk-ch-tf').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));TRK_CHK.iv=b.dataset.v;trkLoadChart();});
+// fallback when code.highcharts.com is unreachable/blocked: same library from cdnjs
+function trkLoadHC(){ return new Promise(res=>{ const sc=document.createElement('script');
+  sc.src='https://cdnjs.cloudflare.com/ajax/libs/highcharts/11.4.8/highstock.js'; sc.onload=()=>res(typeof Highcharts!=='undefined'); sc.onerror=()=>res(false);
+  document.head.appendChild(sc); }); }
+function trkClose(){ $('trk-modal').classList.remove('show'); if(TRK_CH){try{TRK_CH.destroy();}catch(e){} TRK_CH=null;} }
+function trkChart(key, sym){ TRK_CHK.key=key||''; TRK_CHK.sym=sym||''; $('trk-modal').classList.add('show'); trkLoadChart(); }
+async function trkLoadChart(){
+  const q=TRK_CHK.key?'key='+encodeURIComponent(TRK_CHK.key):'symbol='+encodeURIComponent(TRK_CHK.sym);
+  $('trk-ch-title').textContent='Loading…'; $('trk-ch-info').textContent='';
+  const d=await j('/api/tracker/candles?'+q+'&interval='+TRK_CHK.iv);
+  if(TRK_CH){try{TRK_CH.destroy();}catch(e){} TRK_CH=null;}
+  if(d.error){ $('trk-ch-title').textContent='Chart'; $('trk-ch').innerHTML=`<div style="padding:20px;color:var(--sell)">${esc(d.error)}</div>`; return; }
+  const m=d.meta||{}, lv=d.live||{};
+  $('trk-ch-title').textContent = TRK_CHK.key ? `${m.symbol} ${m.strike}${m.opt} · exp ${m.expiry}` : `${TRK_CHK.sym} (underlying)`;
+  $('trk-ch-info').innerHTML = TRK_CHK.key ? `LTP ${lv.ltp??'--'} · VWAP ${lv.vwap??'--'} · H/L ${lv.high??'--'}/${lv.low??'--'} · Vol ${nf(lv.volume)} · OI ${nf(lv.oi)} (day ${nf(lv.oi_lo)}–${nf(lv.oi_hi)}) · Buy/Sell qty ${nf(lv.tbq)}/${nf(lv.tsq)}` : '';
+  const c=d.candles||[]; if(!c.length){ $('trk-ch').innerHTML='<div style="padding:20px;color:var(--mut)">No candles (market closed / no trades yet)</div>'; return; }
+  const ms=t=>t*1000+19800000;   // show IST on the axis
+  const hasOI=c.some(x=>x.oi!=null);
+  if(typeof Highcharts==='undefined' && !(await trkLoadHC())){ $('trk-ch').innerHTML='<div style="padding:20px;color:var(--sell)">Chart library failed to load (offline?)</div>'; return; }
+  TRK_CH=Highcharts.stockChart('trk-ch',{
+    chart:{backgroundColor:'transparent',style:{fontFamily:'JetBrains Mono, monospace'}},
+    rangeSelector:{enabled:false}, navigator:{enabled:false}, scrollbar:{enabled:false}, credits:{enabled:false}, stockTools:{gui:{enabled:false}},
+    legend:{enabled:true,itemStyle:{color:'#8892a6'}},
+    xAxis:{labels:{style:{color:'#8892a6'}},lineColor:'#333'},
+    yAxis:[{height:hasOI?'58%':'75%',labels:{style:{color:'#8892a6'}},gridLineColor:'rgba(255,255,255,.05)'},
+           {top:hasOI?'60%':'77%',height:hasOI?'18%':'23%',offset:0,labels:{style:{color:'#8892a6'}},gridLineColor:'rgba(255,255,255,.05)',title:{text:'Vol',style:{color:'#8892a6'}}},
+           ...(hasOI?[{top:'80%',height:'20%',offset:0,labels:{style:{color:'#8892a6'}},gridLineColor:'rgba(255,255,255,.05)',title:{text:'OI',style:{color:'#8892a6'}}}]:[])],
+    tooltip:{split:true},
+    series:[{type:'candlestick',name:'Price',data:c.map(x=>[ms(x.time),x.open,x.high,x.low,x.close]),color:'#f72585',upColor:'#00f5d4',lineColor:'#f72585',upLineColor:'#00f5d4'},
+      {type:'line',name:'VWAP',data:c.filter(x=>x.vwap!=null).map(x=>[ms(x.time),x.vwap]),color:'#ffd60a',lineWidth:1.5},
+      {type:'column',name:'Volume',yAxis:1,data:c.map(x=>({x:ms(x.time),y:x.volume,color:x.close>=x.open?'rgba(0,245,212,.5)':'rgba(247,37,133,.5)'}))},
+      ...(hasOI?[{type:'line',name:'OI',yAxis:2,data:c.filter(x=>x.oi!=null).map(x=>[ms(x.time),Number(x.oi)]),color:'#8fa8ff'}]:[])]
+  });
 }
 
 renderTF(); renderOptTF(); renderST(); loadIndexChart(); loadAll();

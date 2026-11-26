@@ -190,8 +190,37 @@ def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200):
 
 
 @app.get("/api/tracker/board")
-def tracker_board(symbol: str = "", limit: int = 60):
-    return {"symbol": symbol.upper() or None, "rows": tracker.board(symbol or None, limit)}
+def tracker_board(symbol: str = "", limit: int = 60, sort: str = "move", expiry: str = ""):
+    """symbol -> full strike ladder (front expiry, or ?expiry=); else top rows by sort = move | volume | oi."""
+    return {"symbol": symbol.upper() or None,
+            "expiries": tracker.expiries(symbol) if symbol else [],
+            "rows": tracker.board(symbol or None, limit, sort, expiry or None)}
+
+
+@app.get("/api/tracker/summary")
+def tracker_summary():
+    """Per-stock totals: CE/PE OI, PCR, OI change, volume, OI support/resistance, max-volume strike."""
+    return {"stocks": tracker.summary()}
+
+
+@app.get("/api/tracker/candles")
+def tracker_candles(key: str = "", symbol: str = "", interval: str = "1"):
+    """Candles + session VWAP + volume + OI for one strike (key) or the underlying (symbol)."""
+    if interval not in ("1", "3", "5", "15", "25", "30", "60"):
+        return JSONResponse({"error": "bad interval"}, status_code=400)
+    if symbol and not key:
+        s = tracker.u.stocks.get(symbol.upper())
+        if not s:
+            return JSONResponse({"error": "unknown symbol"}, status_code=404)
+        key = s["underlying_key"]
+    elif key not in tracker.sel:
+        return JSONResponse({"error": "not a tracked strike"}, status_code=404)
+    try:
+        c = tracker.candles(key, interval)
+    except Exception as e:
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"[:300]}, status_code=502)
+    m = tracker.sel.get(key, {})
+    return {"key": key, "meta": m, "live": tracker.latest.get(key, {}), "interval": interval, "candles": c}
 
 
 @app.get("/api/tracker/symbols")
@@ -222,6 +251,11 @@ def tracker_settings_set(body: dict):
     clean = {}
     for k, v in body.items():
         d = TRK_SETTINGS[k]
+        if k == "trkProvider":
+            if str(v).lower() not in ("auto", "dhan", "upstox"):
+                return JSONResponse({"error": "trkProvider must be auto | dhan | upstox"}, status_code=400)
+            clean[k] = str(v).lower()
+            continue
         try:
             clean[k] = bool(v) if isinstance(d, bool) else type(d)(v)
         except (TypeError, ValueError):
@@ -229,7 +263,9 @@ def tracker_settings_set(body: dict):
         if not isinstance(d, bool) and clean[k] < 0:
             return JSONResponse({"error": f"{k} must be >= 0"}, status_code=400)
     if "trkBudget" in clean:
-        clean["trkBudget"] = min(clean["trkBudget"], 5000)
+        clean["trkBudget"] = min(clean["trkBudget"], 25000)
+    if "trkDhanConnections" in clean:
+        clean["trkDhanConnections"] = max(1, min(clean["trkDhanConnections"], 5))
     config.save_overrides(clean)
     tracker._t_rebal = 0          # apply budget / window changes on the next pass
     return {"status": "ok", **{k: config.cfg(k) for k in TRK_SETTINGS}}

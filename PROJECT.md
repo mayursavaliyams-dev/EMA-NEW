@@ -94,17 +94,27 @@ are context on the dashboard; they are not alpha. Do not assume the bot acts on 
 `antigravity-py/trackers/` — tab **🔎 Stock Options + News** on :8000. Never places orders and
 never feeds the strangle engine.
 
-- **Universe:** all 218 F&O stocks, front expiry, CE+PE nearest spot. Budget 5000 = the Upstox
-  v3 `ltpc` per-connection limit, split evenly (~22 legs/stock) with leftovers water-filled.
-- **Stays current:** re-centred on spot every 3 min (WS unsub/sub diff); instrument master
-  refreshed hourly; when spot nears the last listed strike, `/v2/option/contract` is pulled so
-  strikes NSE opens intraday join the same day.
-- **Data:** WebSocket ticks (premium) + REST quotes every 30 s (OI/volume, and fallback price).
-- **Alerts:** premium ±20 % in 5 min, or OI ±25 % in 15 min (≥ 50 lots) → checked against
-  NSE filings + Google News: `NEWS-MATCH` (news in the prior 60 min), `UNEXPLAINED`, or
-  `NEWS-AFTER` (news arrived within 60 min after the move). All thresholds editable in the tab.
-- **Test:** `py test_tracker.py` (offline, 30 checks).
-- Uses a **second** Upstox WebSocket connection (the EMA bot uses the first).
+- **Providers** (`trackers/providers.py`, setting `trkProvider` = auto | dhan | upstox):
+  - **Dhan** (used automatically when `antigravity-py/dhan.json` = `{"client_id": "...",
+    "access_token": "..."}` works): 5 WebSocket connections x 5000 = **25,000 strikes live** in
+    FULL mode — LTP, VWAP (avg price), volume, OI, OI day high/low, prev OI, OHLC, buy/sell qty.
+    Packet layouts follow Dhan's official SDK (dhanhq 2.3.0). An expired/invalid token (codes
+    806-809) stops Dhan and the tracker falls back to Upstox.
+  - **Upstox** (backup): WebSocket ticks for the 5,000 strikes nearest ATM + REST full quotes for
+    all 25,000 (OI, OI hi/lo, VWAP, OHLC, volume), paced to <= 40 calls/min. Upstox gives no
+    previous-day OI, so "OI chg" is blank on Upstox.
+- **Universe:** all 218 F&O stocks, front expiry first (Dhan lists ~27k front-expiry legs, Upstox
+  ~12.6k — the rest then comes from the next/far expiry), strikes nearest spot, water-filled.
+  Re-centred every 3 min (subscription diffed); masters re-downloaded conditionally; Upstox also
+  pulls `/v2/option/contract` near the strike-list edge for intraday new strikes.
+- **Alerts:** PRICE ±20 % / 5 min · OI ±25 % / 15 min (≥ 50 lots) · VOLUME ≥ 5x the day's pace in
+  5 min (≥ 20 lots) → NSE filings + Google News: `NEWS-MATCH` / `UNEXPLAINED` / `NEWS-AFTER`.
+- **Views:** per-stock totals (CE/PE OI, PCR, OI change, volume, OI resistance/support, max-volume
+  strike), strike ladder (OI, OI chg, volume, VWAP, day high/low + range bar), top strikes by
+  move / volume / OI change, chart popup (candles + VWAP + volume + OI, 1/5/15/60 m).
+- **Test:** `py test_tracker.py` (offline, 54 checks incl. a WebSocket round-trip with a fake Dhan
+  feed and a 25k-strike throughput check).
+- Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 
 ## 5. File map
 
