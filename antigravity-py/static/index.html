@@ -74,6 +74,22 @@
   #trades-tbl{font-size:11px} #trades-tbl th,#trades-tbl td{text-align:right;white-space:nowrap;padding:5px 8px}
   #trades-tbl td.l,#trades-tbl th.l{text-align:left}
   #trades-tbl tbody tr:hover td{background:rgba(41,98,255,.08)}
+  /* ---- stock-options tracker ---- */
+  .trk-grid{display:grid;grid-template-columns:1.2fr 1fr;gap:8px;padding:0 12px 12px}
+  @media(max-width:900px){.trk-grid{grid-template-columns:1fr}}
+  .trk-alert{background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--mut);border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px}
+  .trk-alert.NEWS-MATCH{border-left-color:var(--buy)} .trk-alert.UNEXPLAINED{border-left-color:var(--warn)} .trk-alert.NEWS-AFTER{border-left-color:var(--blue)}
+  .badge{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700}
+  .b-NEWS-MATCH{background:rgba(0,245,212,.12);color:var(--buy)} .b-UNEXPLAINED{background:rgba(255,214,10,.12);color:var(--warn)} .b-NEWS-AFTER{background:rgba(41,98,255,.18);color:#8fa8ff}
+  .trk-news a{color:var(--txt);text-decoration:none} .trk-news a:hover{text-decoration:underline}
+  .trk-news div{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:11px}
+  .trk-set{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px;padding:10px;font-size:11px}
+  .trk-set label{display:flex;justify-content:space-between;align-items:center;gap:6px;color:var(--mut)}
+  .trk-set input{width:70px;background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;padding:2px 4px;font-family:var(--mono)}
+  .flt button{background:transparent;border:1px solid var(--bd);color:var(--mut);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px}
+  .flt button.on{color:var(--buy);border-color:var(--buy)}
+  #trk-ladder td,#trk-movers td{padding:2px 5px}
+  #trk-movers tbody tr{cursor:pointer}
 </style>
 </head>
 <body>
@@ -93,6 +109,7 @@
 <div class="tabs">
   <button class="on" data-tab="trading" onclick="setTab('trading')">📈 Trading</button>
   <button data-tab="analysis" onclick="setTab('analysis')">📊 Analysis · P&amp;L</button>
+  <button data-tab="tracker" onclick="setTab('tracker')">🔎 Stock Options + News</button>
 </div>
 
 <div id="tab-trading">
@@ -131,6 +148,36 @@
   <div class="chainwrap"><table id="chain"></table></div>
 </div>
 </div><!-- /tab-trading -->
+
+<div id="tab-tracker" style="display:none">
+  <div style="padding:8px 14px 0;font-size:11px;color:var(--mut)">Side tracker · 5000 CE/PE strikes across all F&amp;O stocks (ATM ±N, auto re-centred, new strikes auto-added) · matched to NSE filings + Google News · <b style="color:var(--warn)">display only — never places orders</b></div>
+  <div class="cards" id="trk-cards"></div>
+  <div class="trk-grid">
+    <div class="panel">
+      <div class="ph"><span>🚨 Alerts — option spike vs news</span>
+        <span class="flt" id="trk-flt"></span></div>
+      <div id="trk-alerts" style="padding:8px;max-height:62vh;overflow:auto"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="panel">
+        <div class="ph"><span>📈 Top movers (within spike window)</span><span class="hl-badge">click a row → ladder</span></div>
+        <div style="max-height:26vh;overflow:auto"><table id="trk-movers"></table></div>
+      </div>
+      <div class="panel">
+        <div class="ph"><span>Strike ladder</span>
+          <select id="trk-sym" style="background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px"></select></div>
+        <div style="max-height:30vh;overflow:auto"><table id="trk-ladder"></table></div>
+        <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
+        <div class="trk-news" id="trk-news" style="padding:4px 10px;max-height:22vh;overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+  <div class="panel" style="margin:0 12px 16px">
+    <div class="ph"><span>⚙️ Settings</span><button class="tg" onclick="trkSave()">Save</button></div>
+    <div class="trk-set" id="trk-set"></div>
+    <div id="trk-set-msg" style="padding:0 10px 8px;font-size:11px;color:var(--mut)"></div>
+  </div>
+</div>
 
 <div id="tab-analysis" style="display:none">
   <div class="cards" id="an-cards"></div>
@@ -381,7 +428,9 @@ function setTab(t){
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
   $('tab-trading').style.display = t==='trading'?'':'none';
   $('tab-analysis').style.display= t==='analysis'?'':'none';
+  $('tab-tracker').style.display = t==='tracker'?'':'none';
   if(t==='analysis') renderAnalysis();
+  if(t==='tracker') { trkSettings(); renderTracker(); }
 }
 const rs=n=>{n=Math.round(n||0);return (n<0?'-':'')+'₹'+Math.abs(n).toLocaleString('en-IN');};
 async function renderAnalysis(){
@@ -482,8 +531,77 @@ async function renderAnalysis(){
   }).join('');
 }
 
+// ---- Stock-options side tracker ----
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const safeUrl=u=>/^https?:\/\//i.test(u||'')?esc(u):'#';
+let TRK_FLT='', TRK_SYM='';
+const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkBudget:'Strikes (max 5000)',trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',
+  trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
+  trkMinOiLots:'Min OI lots',trkCooldownMin:'Cooldown (min)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',
+  trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'OI poll (sec)',trkAlwaysOn:'Run off-hours'};
+$('trk-flt').innerHTML=[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after']]
+  .map(([v,l])=>`<button data-v="${v}" class="${v===''?'on':''}" onclick="TRK_FLT='${v}';document.querySelectorAll('#trk-flt button').forEach(b=>b.classList.toggle('on',b.dataset.v===TRK_FLT));renderTracker()">${l}</button>`).join(' ');
+async function trkSettings(){
+  const st=await j('/api/tracker/settings');
+  $('trk-set').innerHTML=Object.entries(st).map(([k,v])=>typeof v==='boolean'
+    ? `<label>${TRK_LBL[k]||k}<input type="checkbox" data-k="${k}" ${v?'checked':''} style="width:auto"></label>`
+    : `<label>${TRK_LBL[k]||k}<input type="number" step="any" min="0" data-k="${k}" value="${esc(v)}"></label>`).join('');
+}
+async function trkSave(){
+  const body={}; document.querySelectorAll('#trk-set input').forEach(i=>body[i.dataset.k]=i.type==='checkbox'?i.checked:Number(i.value));
+  const r=await fetch('/api/tracker/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  $('trk-set-msg').textContent=r.error?('❌ '+r.error):('✅ saved '+new Date().toLocaleTimeString()); trkSettings();
+}
+function trkPickSym(s){ TRK_SYM=s; $('trk-sym').value=s; renderTracker(); }
+$('trk-sym').onchange=e=>trkPickSym(e.target.value);
+async function renderTracker(){
+  const st=await j('/api/tracker/status');
+  $('trk-cards').innerHTML=[
+    ['Tracked strikes', `${st.instruments_tracked} / ${st.budget}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
+    ['Feed', `<span style="font-size:12px">${esc(st.ws)}</span>`, `${st.ws_ticks} ticks · ${st.quote_polls} OI polls (last ${st.last_quote||'--'})`],
+    ['Re-centred', st.last_rebalance||'--', `new strikes added today: ${st.new_strikes_today}`],
+    ['Alerts today', st.alerts_today, 'price spike / OI change'],
+    ['News sources', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
+  ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
+   + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
+
+  const al=(await j('/api/tracker/alerts?limit=150'+(TRK_FLT?'&status='+TRK_FLT:''))).alerts||[];
+  $('trk-alerts').innerHTML=al.length?al.map(a=>{
+    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px" class="${l.opt==='CE'?'ce':'pe'}">${l.strike}${l.opt} ${l.from}→${l.to} (${l.pct>0?'+':''}${l.pct}%)</span>`).join(' · ');
+    const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
+    return `<div class="trk-alert ${esc(a.status)}">
+      <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
+        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b>
+          <span class="hl-badge">${a.kind==='OI'?'OI':'Premium'} ${a.dir==='UP'?'▲':'▼'} ${a.max_pct}% · spot ${a.spot??'--'} · exp ${esc(a.expiry)}</span></span>
+        <span class="hl-badge">${esc(a.time)}</span></div>
+      <div style="margin-top:4px">${legs}</div>
+      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:'<div class="hl-badge" style="margin-top:4px">no news found for this stock in the window — re-checked for the next '+'hour</div>'}
+    </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet. Alerts appear when an option's premium moves ≥ spike % inside the window, or OI changes sharply.</div>`;
+
+  const mv=(await j('/api/tracker/board?limit=40')).rows||[];
+  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>Chg%</th><th>OI</th></tr></thead><tbody>`+
+    mv.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}</td><td>${r.ltp??'--'}</td>
+      <td class="${r.chg_win_pct>=0?'up':'down'}">${r.chg_win_pct}%</td><td>${r.oi!=null?Number(r.oi).toLocaleString('en-IN'):'--'}</td></tr>`).join('')+'</tbody>';
+
+  const syms=(await j('/api/tracker/symbols')).symbols||[];
+  if(!TRK_SYM && syms.length) TRK_SYM=syms.includes('RELIANCE')?'RELIANCE':syms[0];
+  if($('trk-sym').options.length!==syms.length) $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join('');
+  $('trk-sym').value=TRK_SYM;
+  if(TRK_SYM){
+    const rows=(await j('/api/tracker/board?symbol='+encodeURIComponent(TRK_SYM))).rows||[];
+    const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
+    const atm=rows[0]?.atm;
+    $('trk-ladder').innerHTML=`<thead><tr><th>CE OI</th><th>CE LTP</th><th>CE Δ%</th><th>Strike</th><th>PE Δ%</th><th>PE LTP</th><th>PE OI</th></tr></thead><tbody>`+
+      Object.keys(by).map(Number).sort((a,b)=>a-b).map(k=>{const c=by[k].CE||{},p=by[k].PE||{};
+        const f=v=>v!=null?Number(v).toLocaleString('en-IN'):'--', d=v=>v!=null?`<span class="${v>=0?'up':'down'}">${v}%</span>`:'--';
+        return `<tr class="${k===atm?'atm':''}"><td>${f(c.oi)}</td><td class="ce">${c.ltp??'--'}</td><td>${d(c.chg_win_pct)}</td><td class="strike">${k}</td><td>${d(p.chg_win_pct)}</td><td class="pe">${p.ltp??'--'}</td><td>${f(p.oi)}</td></tr>`}).join('')+'</tbody>';
+    const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
+    $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
+  }
+}
+
 renderTF(); renderOptTF(); renderST(); loadIndexChart(); loadAll();
-setInterval(()=>{ loadAll(); if(TAB==='analysis') renderAnalysis(); },5000);
+setInterval(()=>{ loadAll(); if(TAB==='analysis') renderAnalysis(); if(TAB==='tracker') renderTracker(); },5000);
 setInterval(()=>{ if(TAB==='trading') loadIndexChart(); },20000);
 </script>
 </body>

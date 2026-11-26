@@ -15,12 +15,16 @@ from connectors import UpstoxConnector
 from engines import StrangleEngine
 from greeks import greeks
 import sizing
+from trackers.news import NewsHub
+from trackers.stock_options import StockOptionsTracker, SETTINGS as TRK_SETTINGS
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 IST = timezone(timedelta(hours=5, minutes=30))
 
 conn = UpstoxConnector()
 engine = StrangleEngine(conn)
+news_hub = NewsHub()
+tracker = StockOptionsTracker(conn, news_hub)   # side tracker: display only, no orders
 app = FastAPI(title="Antigravity-Py", version="0.1")
 
 
@@ -169,6 +173,68 @@ def api_sizing(symbol: str = "NIFTY", capital: float = 100000, structure: str = 
             "margin_per_lot": sizing.MARGIN.get(symbol.upper(), {}).get(structure)}
 
 
+# ---------------- stock-options side tracker (display only) ----------------
+@app.get("/api/tracker/status")
+def tracker_status():
+    return tracker.status()
+
+
+@app.get("/api/tracker/alerts")
+def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200):
+    out = list(tracker.alerts)
+    if status:
+        out = [a for a in out if a["status"] == status.upper()]
+    if symbol:
+        out = [a for a in out if a["symbol"] == symbol.upper()]
+    return {"alerts": out[::-1][:limit]}
+
+
+@app.get("/api/tracker/board")
+def tracker_board(symbol: str = "", limit: int = 60):
+    return {"symbol": symbol.upper() or None, "rows": tracker.board(symbol or None, limit)}
+
+
+@app.get("/api/tracker/symbols")
+def tracker_symbols():
+    return {"symbols": tracker.symbols()}
+
+
+@app.get("/api/tracker/news")
+def tracker_news(symbol: str = "", hours: float = 24):
+    since = datetime.now(IST).timestamp() - hours * 3600
+    if symbol:
+        s = tracker.u.stocks.get(symbol.upper(), {})
+        return {"items": news_hub.news_for(symbol.upper(), s.get("name", symbol), since_ts=since)}
+    fo = set(tracker.u.stocks) or None
+    return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
+
+
+@app.get("/api/tracker/settings")
+def tracker_settings_get():
+    return {k: config.cfg(k) for k in TRK_SETTINGS}
+
+
+@app.post("/api/tracker/settings")
+def tracker_settings_set(body: dict):
+    bad = [k for k in body if k not in TRK_SETTINGS]
+    if bad:
+        return JSONResponse({"error": f"unknown settings: {bad}"}, status_code=400)
+    clean = {}
+    for k, v in body.items():
+        d = TRK_SETTINGS[k]
+        try:
+            clean[k] = bool(v) if isinstance(d, bool) else type(d)(v)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": f"bad value for {k}"}, status_code=400)
+        if not isinstance(d, bool) and clean[k] < 0:
+            return JSONResponse({"error": f"{k} must be >= 0"}, status_code=400)
+    if "trkBudget" in clean:
+        clean["trkBudget"] = min(clean["trkBudget"], 5000)
+    config.save_overrides(clean)
+    tracker._t_rebal = 0          # apply budget / window changes on the next pass
+    return {"status": "ok", **{k: config.cfg(k) for k in TRK_SETTINGS}}
+
+
 # ---------------- engine loop ----------------
 async def engine_loop():
     while True:
@@ -188,6 +254,7 @@ async def engine_loop():
 @app.on_event("startup")
 async def _startup():
     asyncio.create_task(engine_loop())
+    tracker.start()
     print(f"[antigravity-py] up — mode={config.cfg('TRADE_MODE')} "
           f"strangle={config.cfg('STRANGLE_ENGINE_ENABLED')}")
 

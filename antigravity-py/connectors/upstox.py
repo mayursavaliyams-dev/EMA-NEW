@@ -35,6 +35,32 @@ class UpstoxConnector:
             out[v.get("instrument_token")] = v.get("last_price")
         return out
 
+    def quotes(self, instrument_keys):
+        """Full market quote (LTP + OI + volume) for up to 500 keys per call.
+        Returns {instrument_key: {"ltp", "oi", "volume"}}."""
+        out = {}
+        keys = list(instrument_keys)
+        for i in range(0, len(keys), 500):
+            q = urllib.parse.quote(",".join(keys[i:i + 500]), safe=",")
+            r = self._client.get(f"/v2/market-quote/quotes?instrument_key={q}", headers=self._h())
+            if r.status_code != 200:
+                raise RuntimeError(f"quotes HTTP {r.status_code}: {r.text[:200]}")
+            for _, v in (r.json().get("data", {}) or {}).items():
+                k = v.get("instrument_token")
+                if k:
+                    out[k] = {"ltp": v.get("last_price"), "oi": v.get("oi"),
+                              "volume": v.get("volume")}
+        return out
+
+    def option_contracts(self, underlying_key):
+        """Live contract list for one underlying — catches strikes NSE adds intraday
+        (the daily instrument master only learns of them the next morning)."""
+        q = urllib.parse.quote(underlying_key, safe="")
+        r = self._client.get(f"/v2/option/contract?instrument_key={q}", headers=self._h())
+        if r.status_code != 200:
+            raise RuntimeError(f"option/contract HTTP {r.status_code}")
+        return r.json().get("data", []) or []
+
     def expiries(self, underlying_key):
         q = urllib.parse.quote(underlying_key, safe="")
         r = self._client.get(f"/v2/option/contract?instrument_key={q}", headers=self._h())

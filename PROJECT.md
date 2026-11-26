@@ -89,6 +89,23 @@ are context on the dashboard; they are not alpha. Do not assume the bot acts on 
 
 ---
 
+## 4b. Stock-options side tracker (display only)
+
+`antigravity-py/trackers/` — tab **🔎 Stock Options + News** on :8000. Never places orders and
+never feeds the strangle engine.
+
+- **Universe:** all 218 F&O stocks, front expiry, CE+PE nearest spot. Budget 5000 = the Upstox
+  v3 `ltpc` per-connection limit, split evenly (~22 legs/stock) with leftovers water-filled.
+- **Stays current:** re-centred on spot every 3 min (WS unsub/sub diff); instrument master
+  refreshed hourly; when spot nears the last listed strike, `/v2/option/contract` is pulled so
+  strikes NSE opens intraday join the same day.
+- **Data:** WebSocket ticks (premium) + REST quotes every 60 s (OI/volume, and fallback price).
+- **Alerts:** premium ±20 % in 5 min, or OI ±25 % in 15 min (≥ 50 lots) → checked against
+  NSE filings + Google News: `NEWS-MATCH` (news in the prior 60 min), `UNEXPLAINED`, or
+  `NEWS-AFTER` (news arrived within 60 min after the move). All thresholds editable in the tab.
+- **Test:** `py test_tracker.py` (offline, 30 checks).
+- Uses a **second** Upstox WebSocket connection (the EMA bot uses the first).
+
 ## 5. File map
 
 ```
