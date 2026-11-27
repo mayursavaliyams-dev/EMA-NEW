@@ -33,6 +33,8 @@ import config
 from trackers.providers import DhanProvider, UpstoxProvider
 from trackers.history import History, label as bu_label, LABELS
 from trackers.nse_context import NseContext
+from trackers.nse_extra import NseExtra
+from trackers.notify import Telegram, format_alert
 from trackers.trend import TrendEngine
 from trackers import ivcalc
 
@@ -72,6 +74,10 @@ SETTINGS = {
     "trkFutPricePct": 1.0,      # FUT_BUILDUP: futures price moved >= this % vs previous close ...
     "trkFutOiPct": 5,           # ... and futures OI moved >= this % vs previous day
     "trkBasisMinPct": 0.1,      # BASIS flip alert only when |basis| >= this % on the new side
+    "trkDelivMult": 2.0,        # DELIVERY alert: delivered qty >= this x its 20-day average ...
+    "trkDelivPctAbove": 10,     # ... and delivery % >= 20-day average + this many points
+    "trkDealAlerts": True,      # bulk / block deal alerts for F&O stocks
+    "trkTelegramKinds": "TREND,TREND_END,FUT_BUILDUP,UNUSUAL,OI_SHIFT,ATH,EXP_MOVE,MAXPAIN,BASIS,BAN,DELIVERY,DEAL,FII",
     "trkMwplAlertPct": 90,      # alert when a stock's MWPL usage crosses this (ban at 95)
     "trkHistDays": 100,         # NSE bhavcopy lookback for multi-day OI / all-time high-low
     "trkCooldownMin": 15,       # same contract+kind+direction won't re-alert inside this
@@ -411,7 +417,7 @@ def _fmt(v):
 
 
 class StockOptionsTracker:
-    def __init__(self, conn, news, universe=None, detector=None, providers=None, history=None, context=None):
+    def __init__(self, conn, news, universe=None, detector=None, providers=None, history=None, context=None, extra=None):
         self.conn, self.news = conn, news
         self.u = universe or Universe()
         self.det = detector or Detector()
@@ -420,6 +426,11 @@ class StockOptionsTracker:
                                        "upstox": UpstoxProvider(conn)}
         self.hist = history if history is not None else History(days=setting("trkHistDays"))
         self.ctx = context if context is not None else NseContext()
+        self.extra = extra if extra is not None else NseExtra()
+        self.anal = {}                    # symbol -> live analytics (max pain, GEX, skew, expected move, IV rank)
+        self._seen_deals = set()
+        self.tg = Telegram()
+        self._part_date = None
         self.p = None                     # active provider
         self.sel = {}                     # key -> meta (everything tracked)
         self.live_keys = set()            # subset streamed over WebSocket
@@ -508,6 +519,12 @@ class StockOptionsTracker:
             except Exception as e:
                 self.stats["errors"]["history"] = f"{type(e).__name__}: {e}"[:200]
             try:
+                if self.extra is not False:
+                    if self.extra.refresh(symbols=set(self.u.stocks) or None):
+                        self.extra_alerts()
+            except Exception as e:
+                self.stats["errors"]["extra"] = f"{type(e).__name__}: {e}"[:200]
+            try:
                 if self.ctx is not False and now - self._t_ctx > 3600:
                     self._t_ctx = now
                     self.ctx.refresh(force=True)
@@ -567,6 +584,7 @@ class StockOptionsTracker:
             self._t_iv = now
             self.compute_greeks(now)
             self.stock_signals(now)
+            self.analytics(now)
         self.stats["feed"] = self.p.status_text()
         self._drain_events()
         if now - self._t_recheck > 120:
@@ -807,6 +825,155 @@ class StockOptionsTracker:
     def futures(self):
         return [r for r in (self.fut_row(sym) for sym in sorted(self.u.stocks)) if r]
 
+    # ---------------- per-stock analytics: max pain, GEX, skew, expected move, IV rank ----------------
+    def analytics(self, now=None):
+        now = now or time.time()
+        by = defaultdict(list)
+        with self._lock:
+            sel = list(self.sel.items())
+        for k, m in sel:
+            if m.get("front", True) and k in self.latest:
+                by[m["symbol"]].append((k, m))
+        for sym, items in by.items():
+            uk = self.u.stocks.get(sym, {}).get("underlying_key")
+            spot = self.spots.get(uk) or items[0][1]["spot"]
+            ce_oi, pe_oi, gex = defaultdict(float), defaultdict(float), defaultdict(float)
+            calls, puts, atm = [], [], {}
+            for k, m in items:
+                lv, g = self.latest[k], self.greeks.get(k)
+                oi = lv.get("oi") or 0
+                (ce_oi if m["opt"] == "CE" else pe_oi)[m["strike"]] += oi
+                if g:
+                    # dealer-convention GEX (calls +, puts -) in ₹ per 1% move — an estimate, not a fact
+                    gex[m["strike"]] += (1 if m["opt"] == "CE" else -1) * g["gamma"] * oi * spot * spot * 0.01
+                    (calls if m["opt"] == "CE" else puts).append((g["delta"], g["iv"]))
+                if m["strike"] == m["atm"] and lv.get("ltp"):
+                    atm[m["opt"]] = lv["ltp"]
+                    if g:
+                        atm[m["opt"] + "_iv"] = g["iv"]
+            strikes = sorted(set(ce_oi) | set(pe_oi))
+            mp = None
+            if strikes and (sum(ce_oi.values()) + sum(pe_oi.values())) > 0:
+                mp = min(strikes, key=lambda K: sum((K - x) * ce_oi[x] for x in strikes if x < K)
+                         + sum((x - K) * pe_oi[x] for x in strikes if x > K))
+            gtot = sum(gex.values()) if gex else None
+            flip, cum = None, 0.0
+            for K in sorted(gex):
+                prev = cum
+                cum += gex[K]
+                if prev and (prev < 0) != (cum < 0):
+                    flip = K
+                    break
+            skew = None
+            if calls and puts:
+                c25 = min(calls, key=lambda x: abs(x[0] - 0.25))
+                p25 = min(puts, key=lambda x: abs(x[0] + 0.25))
+                skew = round(p25[1] - c25[1], 2)
+            straddle = atm.get("CE", 0) + atm.get("PE", 0) if "CE" in atm and "PE" in atm else None
+            atm_iv = (atm["CE_iv"] + atm["PE_iv"]) / 2 if "CE_iv" in atm and "PE_iv" in atm else None
+            ivs = self.hist.iv_stats(sym, atm_iv) if self.hist else None
+            a = self.anal.setdefault(sym, {})
+            a.update({"max_pain": mp, "gex_cr": round(gtot / 1e7, 2) if gtot is not None else None, "gex_flip": flip,
+                      "skew": skew, "straddle": round(straddle, 2) if straddle else None,
+                      "exp_move_pct": round(straddle / spot * 100, 2) if straddle and spot else None,
+                      "exp_hi": round(spot + straddle, 2) if straddle else None,
+                      "exp_lo": round(spot - straddle, 2) if straddle else None, "atm_iv": round(atm_iv, 2) if atm_iv else None})
+            if ivs:
+                a.update({k: ivs[k] for k in ("iv_rank", "iv_pctile", "iv_min", "iv_max", "iv_days", "iv_term", "iv_next",
+                                              "iv_extreme")})
+            st = self._sig(sym, now)
+            # max-pain shift (must hold two checks)
+            if mp is not None:
+                if st.get("mp") is None:
+                    st["mp"] = mp
+                elif mp != st["mp"]:
+                    if st.get("mp_cand") == mp:
+                        old, st["mp"], st["mp_cand"] = st["mp"], mp, None
+                        self._events.put({"kind": "MAXPAIN", "dir": "UP" if mp > old else "DOWN", "key": items[0][0],
+                                          "symbol": sym, "from": old, "to": mp, "pct": round((mp - old) / old * 100, 2),
+                                          "ts": now, "reason": f"max pain moved {_fmt(old)} → {_fmt(mp)} (spot {_fmt(spot)}) — "
+                                                               f"option writers' pain point shifted {'up' if mp > old else 'down'}"})
+                    else:
+                        st["mp_cand"] = mp
+                else:
+                    st["mp_cand"] = None
+            # expected-move break: range fixed from the day's first straddle reading
+            if straddle and spot:
+                if st.get("em_lo") is None:
+                    st["em_lo"], st["em_hi"], st["em_done"] = spot - straddle, spot + straddle, set()
+                for d, hit, lvl in (("UP", spot > st["em_hi"], st["em_hi"]), ("DOWN", spot < st["em_lo"], st["em_lo"])):
+                    if hit and d not in st["em_done"]:
+                        st["em_done"].add(d)
+                        self._events.put({"kind": "EXP_MOVE", "dir": d, "key": items[0][0], "symbol": sym, "from": round(lvl, 2),
+                                          "to": spot, "pct": round((spot - lvl) / lvl * 100, 2), "ts": now,
+                                          "reason": f"{sym} {_fmt(spot)} broke the options-implied expected move "
+                                                    f"{_fmt(round(st['em_lo'], 2))}–{_fmt(round(st['em_hi'], 2))} "
+                                                    f"(ATM straddle at the day's first reading) — move bigger than priced"})
+        return len(by)
+
+    def extra_alerts(self):
+        """Daily: delivery accumulation/distribution, FII positioning; intraday: new bulk/block deals."""
+        ts = time.time()
+        ex = self.extra
+        for sym in self.u.stocks:
+            d = ex.delivery_info(sym)
+            if not d or d["deliv_qty_x20"] is None or d["deliv_avg20"] is None:
+                continue
+            if (d["deliv_qty_x20"] >= setting("trkDelivMult") and d["deliv_pct"] >= d["deliv_avg20"] + setting("trkDelivPctAbove")
+                    and self._once_today(("DELIV", sym, d["date"]))):
+                up = (d["price_chg_pct"] or 0) >= 0
+                self._ctx_alert(sym, "DELIVERY", f"{sym} delivery {d['deliv_pct']}% on {d['date']} vs 20-day avg {d['deliv_avg20']}% "
+                                                 f"({d['deliv_qty_x20']}x usual delivered qty), price {d['price_chg_pct']:+.2f}% — "
+                                                 f"{'ACCUMULATION (real buying)' if up else 'DISTRIBUTION (real selling)'}", ts,
+                                "UP" if up else "DOWN")
+        if setting("trkDealAlerts"):
+            for x in ex.deals["bulk"] + ex.deals["block"]:
+                key = (x["kind"], x["symbol"], x["client"], x["side"], x["qty"], x["date"])
+                if x["symbol"] in self.u.stocks and key not in self._seen_deals:
+                    self._seen_deals.add(key)
+                    val = (x["qty"] or 0) * (x["price"] or 0) / 1e7
+                    self._ctx_alert(x["symbol"], "DEAL", f"{x['kind']} deal {x['date']}: {x['client']} {x['side']} "
+                                                         f"{_fmt(x['qty'])} shares @ {_fmt(x['price'])} (₹{val:.1f} cr)", ts,
+                                    "UP" if x["side"] == "BUY" else "DOWN")
+        pv = ex.participant_view()
+        if pv["date"] and pv["date"] != self._part_date and pv["prev_date"]:
+            self._part_date = pv["date"]
+            rows = {r["who"]: r for r in pv["rows"]}
+            f = rows.get("FII")
+            if f and self._once_today(("FII", pv["date"])):
+                flip = f["fut_idx_chg"] is not None and (f["fut_idx"] > 0) != (f["fut_idx"] - f["fut_idx_chg"] > 0)
+                parts = [f"{w}: index fut net {_fmt(int(r['fut_idx']))} ({int(r['fut_idx_chg']):+,})"
+                         for w, r in rows.items() if r.get("fut_idx_chg") is not None]
+                self._ctx_alert("MARKET", "FII", f"Participant OI {pv['date']}: FII index futures {f['fut_idx_long_pct']}% long"
+                                                 f"{' — FII FLIPPED ' + ('LONG' if f['fut_idx'] > 0 else 'SHORT') if flip else ''}; "
+                                                 + "; ".join(parts), ts, "UP" if f["fut_idx_chg"] and f["fut_idx_chg"] > 0 else "DOWN")
+
+    def sectors(self):
+        """Sector heatmap rows from the per-stock summary."""
+        out = {}
+        for a in self.summary():
+            sec = a.get("sector") or "Other"
+            o = out.setdefault(sec, {"sector": sec, "stocks": 0, "up": 0, "down": 0, "_chg": [], "ce_oi_chg": 0, "pe_oi_chg": 0,
+                                     "fut_lb": 0, "fut_sb": 0, "fut_sc": 0, "fut_lu": 0, "alerts": 0, "members": []})
+            o["stocks"] += 1
+            o["members"].append({"symbol": a["symbol"], "chg_pct": a.get("chg_pct")})
+            if a.get("chg_pct") is not None:
+                o["_chg"].append(a["chg_pct"])
+                o["up" if a["chg_pct"] > 0 else "down"] += a["chg_pct"] != 0
+            o["ce_oi_chg"] += a.get("ce_oi_chg") or 0
+            o["pe_oi_chg"] += a.get("pe_oi_chg") or 0
+            if a.get("fut_buildup"):
+                o["fut_" + a["fut_buildup"].lower()] += 1
+            o["alerts"] += a.get("alerts", 0)
+        res = []
+        for o in out.values():
+            c = o.pop("_chg")
+            o["avg_chg_pct"] = round(sum(c) / len(c), 2) if c else None
+            o["members"].sort(key=lambda m: -(m["chg_pct"] or -999))
+            res.append(o)
+        res.sort(key=lambda o: -(o["avg_chg_pct"] if o["avg_chg_pct"] is not None else -999))
+        return res
+
     # ---------------- stock-level signals ----------------
     def _sig(self, sym, ts):
         day = datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d")
@@ -959,15 +1126,17 @@ class StockOptionsTracker:
                 self._ctx_alert(sym, "MWPL", f"{sym} MWPL usage {pct}% ({info.get('mwpl_chg'):+}% vs previous day) — "
                                              f"ban triggers at 95%", ts)
 
-    def _ctx_alert(self, sym, kind, reason, ts):
+    def _ctx_alert(self, sym, kind, reason, ts, d="UP"):
         self._alert_seq += 1
         a = {"id": self._alert_seq, "symbol": sym, "name": self.u.stocks.get(sym, {}).get("name", sym), "kind": kind,
-             "dir": "UP", "ts": ts, "time": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S"),
+             "dir": d, "ts": ts, "time": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M:%S"),
              "spot": None, "expiry": None, "max_pct": 0, "legs": [], "reason": reason,
-             "first_alert": self._first_alert(sym, ts), "status": "INFO", "news": [], "context": self.ctx.info(sym)}
+             "first_alert": self._first_alert(sym, ts), "status": "INFO", "news": [],
+             "context": self.ctx.info(sym) if self.ctx else {}}
         with self._lock:
             self.alerts.append(a)
             self._save_alerts()
+        self._notify(a)
 
     # ---------------- trends ----------------
     def _trend_event(self, e, sym, m, ts):
@@ -1100,11 +1269,17 @@ class StockOptionsTracker:
                 news = []
                 self.stats["errors"]["news"] = str(e)[:200]
             a["status"], a["news"] = ("NEWS-MATCH" if news else "UNEXPLAINED"), news[:8]
+            self._notify(a)
             done += 1
         if done:
             with self._lock:
                 self._save_alerts()
         return done
+
+    def _notify(self, a):
+        kinds = {k.strip().upper() for k in str(setting("trkTelegramKinds") or "").split(",") if k.strip()}
+        if a.get("kind") in kinds and self.tg.enabled():
+            self.tg.push(format_alert(a))
 
     def _news_loop(self):
         while not self._stop.is_set():
@@ -1274,6 +1449,16 @@ class StockOptionsTracker:
             sp, pcl = self.spots.get(uk), ul.get("prev_close")
             a["spot"] = round(sp, 2) if sp else a["spot"]
             a["chg_pct"] = round((sp - pcl) / pcl * 100, 2) if sp and pcl else None
+            an = self.anal.get(a["symbol"], {})
+            a.update({k: an.get(k) for k in ("max_pain", "gex_cr", "gex_flip", "skew", "straddle", "exp_move_pct",
+                                             "exp_hi", "exp_lo", "iv_rank", "iv_pctile", "iv_term", "iv_extreme")})
+            if an.get("atm_iv"):
+                a["atm_iv"] = an["atm_iv"]
+            if self.extra:
+                ei = self.extra.info(a["symbol"])
+                dl = ei["delivery"] or {}
+                a.update({"sector": ei["sector"], "deliv_pct": dl.get("deliv_pct"), "deliv_avg20": dl.get("deliv_avg20"),
+                          "deliv_x20": dl.get("deliv_qty_x20"), "deals": len(ei["deals"])})
             fr = self.fut_row(a["symbol"])
             if fr:
                 a.update({"fut_ltp": fr["ltp"], "fut_basis_pct": fr["basis_pct"], "fut_oi_chg_pct": fr["oi_chg_pct"],
@@ -1308,6 +1493,8 @@ class StockOptionsTracker:
                 "trends_today": sum(1 for t in self.trends
                                     if datetime.fromtimestamp(t.get("confirmed_at") or 0, IST).strftime("%Y-%m-%d") == today),
                 "greeks": len(self.greeks),
+                "telegram": {"enabled": self.tg.enabled(), "sent": self.tg.sent, "error": self.tg.error},
+                "extra_errors": self.extra.errors if self.extra else None,
                 "history": self.hist.status if self.hist else "off",
                 "context": ({"ban": sorted(self.ctx.ban), "ban_date": self.ctx.ban_date, "errors": self.ctx.errors}
                             if self.ctx else None),

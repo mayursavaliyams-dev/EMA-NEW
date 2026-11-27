@@ -119,6 +119,18 @@ never feeds the strangle engine.
   basis (premium/discount %), OI change vs previous day, futures buildup label, rollover %. History
   (bhavcopy STF rows) adds futures OI 5/20-day change, OI streak and repeated daily activity.
   Alerts: FUT_BUILDUP (price >= 1 % and OI >= 5 %), BASIS flip (premium <-> discount).
+- **Market & EOD data** (`trackers/nse_extra.py`, cached in `data/nse_extra/`): FII/DII/Pro/Client
+  participant OI (20 days, net + change + streak), delivery % per stock (vs 5/20-day average), today's
+  bulk/block deals, sector map (Nifty 500 list) → sector heatmap. Alerts: DELIVERY (accumulation /
+  distribution), DEAL, FII (daily, flags an FII flip).
+- **Per-stock analytics:** IV Rank / IV Percentile (ATM IV history rebuilt from 100 days of bhavcopy
+  closes) + IV term (next − front), max pain (+ MAXPAIN shift alert), GEX ₹cr per 1 % + gamma-flip
+  strike (dealer-convention estimate), 25-delta IV skew, expected move from the ATM straddle (+ EXP_MOVE
+  alert when spot breaks the day's implied range).
+- **Telegram** (`trackers/notify.py`): create `antigravity-py/telegram.json` = `{"bot_token": "...",
+  "chat_id": "..."}` (gitignored); kinds pushed = setting `trkTelegramKinds`; test button in the tab.
+- **Export:** `/api/tracker/export?what=alerts|trends|summary|history|futures|sectors|participants&fmt=xlsx|csv`
+  (buttons in the tab).
 - **Context** (`trackers/nse_context.py`): F&O ban list, MWPL usage %, corporate-event calendar.
 - **Trends** (`trackers/trend.py`): per strike and per stock, on 3-min candles — start = EMA5>EMA13
   + above VWAP + 3 green candles + min move from the swing low; end = close below EMA13/VWAP or 50 %
@@ -129,7 +141,7 @@ never feeds the strangle engine.
   HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
   breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
   NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
-- **Test:** `py test_tracker.py` (offline, 89 checks incl. a WebSocket round-trip with a fake Dhan
+- **Test:** `py test_tracker.py` (offline, 104 checks incl. a WebSocket round-trip with a fake Dhan
   feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
 - Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 

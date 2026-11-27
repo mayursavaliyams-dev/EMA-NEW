@@ -29,6 +29,7 @@ SET = dict(T.SETTINGS, trkAlwaysOn=True)
 T.setting = lambda k: SET[k]
 IST = T.IST
 PASS = []
+_TG = []
 
 
 def check(name, cond, detail=""):
@@ -110,11 +111,12 @@ class FakeNews:
                 if (since_ts is None or i["ts"] >= since_ts) and (until_ts is None or i["ts"] <= until_ts)]
 
 
-def make(provider=None, history=False, context=False):
+def make(provider=None, history=False, context=False, extra=False):
     p = provider or FakeProvider()
     n = FakeNews()
     t = T.StockOptionsTracker(None, n, detector=T.Detector(get=lambda k: SET[k]), providers={"upstox": p},
-                              history=history, context=context)
+                              history=history, context=context, extra=extra)
+    t.tg._send = lambda text: (_TG.append(text) or True)
     t.alerts.clear()
     t.choose_provider()
     t.u.build(p.load_rows())
@@ -641,12 +643,103 @@ def test_futures():
     check("stock day change % for the UP/DOWN filter", s9["chg_pct"] == 1.0 and s9["spot"] == 1010.0)
 
 
+def test_analytics():
+    t, p, n = make()
+    t.rebalance()
+    sym = "STK10"
+    uk = t.u.stocks[sym]["underlying_key"]
+    now = T.session_open_ts(time.time()) + 2 * 3600
+    t.on_data(uk, {"ltp": 1300.0}, now)
+    legs = {(m["strike"], m["opt"]): k for k, m in t.sel.items() if m["symbol"] == sym and m["front"]}
+    for (K, o), k in legs.items():
+        intrinsic = max(0, (1300 - K) if o == "CE" else (K - 1300))
+        oi = 50000 if (o == "PE" and K == 1250) else 60000 if (o == "CE" and K == 1350) else 5000
+        t.on_data(k, {"ltp": intrinsic + 18 * 2.718 ** (-abs(K - 1300) / 60), "oi": oi}, now)
+    t.compute_greeks(now)
+    t.analytics(now)
+    a = t.anal[sym]
+    check("max pain computed from live OI", a["max_pain"] is not None and 1250 <= a["max_pain"] <= 1350, str(a["max_pain"]))
+    check("GEX (₹ cr per 1%) + IV skew + expected move from ATM straddle",
+          a["gex_cr"] is not None and a["skew"] is not None and a["straddle"] and a["exp_hi"] > 1300 > a["exp_lo"],
+          f"(gex {a['gex_cr']} skew {a['skew']} straddle {a['straddle']})")
+    t.on_data(uk, {"ltp": a["exp_hi"] + 5}, now + 60)
+    t.analytics(now + 60)
+    t._drain_events()
+    check("EXP_MOVE alert when spot breaks the implied range", any(x["kind"] == "EXP_MOVE" and x["symbol"] == sym for x in t.alerts))
+    # IV rank against stored history
+    class H:
+        def iv_stats(self, s, cur=None):
+            from trackers.history import History
+            h = History.__new__(History)
+            h.iv_hist = {s: [("2026-10-%02d" % i, 10.0 + i, None) for i in range(1, 21)]}
+            return History.iv_stats(h, s, cur)
+        def hist_of(self, *a):
+            return None
+    t.hist = H()
+    t.hist.contract = lambda tok: None
+    t.analytics(now + 90)
+    check("IV rank / percentile vs history (rank clamped 0-100)", t.anal[sym]["iv_rank"] is not None and 0 <= t.anal[sym]["iv_rank"] <= 100
+          and t.anal[sym]["iv_pctile"] is not None,
+          f"(rank {t.anal[sym]['iv_rank']} pct {t.anal[sym]['iv_pctile']})")
+
+
+def test_nse_extra_and_alerts():
+    from trackers.nse_extra import NseExtra
+    x = NseExtra(cache=tempfile.mkdtemp(), fetch=False)
+    txt = ('"Participant wise Open Interest",,,,,,,,,,,,,,\nClient Type,a,b,c,d,e,f,g,h,i,j,k,l,m,n\n'
+           "FII,1000,3000,10,5,1,1,1,1,1,1,1,1,2000,3000\nDII,500,100,10,5,1,1,1,1,1,1,1,1,600,200\n"
+           "Pro,10,10,1,1,1,1,1,1,1,1,1,1,1,1\nClient,10,10,1,1,1,1,1,1,1,1,1,1,1,1\n")
+    txt2 = txt.replace("FII,1000,3000", "FII,4000,2000")
+    x.participants = [{"date": "2026-11-25", "rows": x.parse_participants(txt)},
+                      {"date": "2026-11-26", "rows": x.parse_participants(txt2)}]
+    v = x.participant_view()
+    f = [r for r in v["rows"] if r["who"] == "FII"][0]
+    check("participant OI: FII net index futures + change", f["fut_idx"] == 2000 and f["fut_idx_chg"] == 4000)
+    x.delivery = {"STK11": [{"date": f"d{i}", "close": 100, "prev_close": 100, "qty": 1000, "deliv_qty": 300, "deliv_pct": 30}
+                            for i in range(20)] + [{"date": "d20", "close": 104, "prev_close": 100, "qty": 2000,
+                                                    "deliv_qty": 1300, "deliv_pct": 65}]}
+    d = x.delivery_info("STK11")
+    check("delivery %: vs 20-day average", d["deliv_pct"] == 65 and d["deliv_avg20"] == 30 and d["deliv_qty_x20"] == 4.33)
+    x.deals = {"date": "26-Nov-2026", "bulk": [], "block": [{"kind": "BLOCK", "symbol": "STK12", "name": "S", "client": "BIG MF",
+                                                             "side": "BUY", "qty": 100000, "price": 1300, "date": "26-Nov-2026"}]}
+    x.sector = {"STK11": "Banks", "STK12": "IT"}
+    t, p, n = make(extra=x)
+    t.rebalance()
+    _TG.clear()
+    t.tg.path = os.path.join(TMP, "tg.json")
+    json.dump({"bot_token": "T", "chat_id": "1"}, open(t.tg.path, "w"))
+    t.extra_alerts()
+    kinds = {(a["symbol"], a["kind"]) for a in t.alerts}
+    check("DELIVERY accumulation + DEAL + FII alerts", {("STK11", "DELIVERY"), ("STK12", "DEAL"), ("MARKET", "FII")} <= kinds, str(kinds))
+    fii = [a for a in t.alerts if a["kind"] == "FII"][0]
+    check("FII flip detected in reason", "FLIPPED LONG" in fii["reason"])
+    t.tg.flush_sync()
+    check("Telegram push for selected kinds", any("DELIVERY" in m for m in _TG) and any("FII" in m for m in _TG), f"({len(_TG)} msgs)")
+    s11 = [r for r in t.summary() if r["symbol"] == "STK11"][0]
+    check("summary: sector + delivery", s11["sector"] == "Banks" and s11["deliv_pct"] == 65)
+    sec = {o["sector"]: o for o in t.sectors()}
+    check("sector heatmap rows", "Banks" in sec and "Other" in sec and sec["Banks"]["stocks"] == 1)
+
+
+def test_export_api():
+    from fastapi.testclient import TestClient
+    import main
+    c = TestClient(main.app)
+    main.tracker.alerts.append({"id": 1, "symbol": "X", "kind": "PRICE", "dir": "UP", "time": "2026-11-27 10:00:00",
+                                "ts": 1, "reason": "test ₹", "legs": [{"a": 1}], "news": []})
+    r = c.get("/api/tracker/export?what=alerts&fmt=csv")
+    check("CSV export (Excel-ready, UTF-8 BOM)", r.status_code == 200 and r.text.startswith("﻿") and "reason" in r.text)
+    r = c.get("/api/tracker/export?what=alerts&fmt=xlsx")
+    check("XLSX export", r.status_code == 200 and r.content[:2] == b"PK")
+    check("bad export target rejected", c.get("/api/tracker/export?what=nope").status_code == 400)
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

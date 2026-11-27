@@ -62,6 +62,7 @@ class History:
         self._lock = threading.Lock()
         self.dates = []               # trading dates loaded (YYYY-MM-DD), ascending
         self.contracts = {}           # tok -> contract record
+        self.iv_hist = {}             # sym -> [(date, front ATM IV %, next ATM IV % | None)]
         self.stock_days = {}          # sym -> [ {date, undl, ce_oi, pe_oi, ce_choi, pe_choi, ce_vol, pe_vol, ce_lab{}, pe_lab{}} ]
         self.status = "not loaded"
         self.loaded_at = 0.0
@@ -127,12 +128,12 @@ class History:
         files = sorted(f for f in os.listdir(self.cache) if f.endswith(".csv.gz"))
         cutoff = (today - timedelta(days=self.lookback)).strftime("%Y%m%d")
         files = [f for f in files if f[:8] >= cutoff]
-        contracts, stock_days, dates = {}, defaultdict(list), []
+        contracts, stock_days, dates, iv_rows = {}, defaultdict(list), [], []
         today_s = today.strftime("%Y-%m-%d")
         for fn in files:
             date = f"{fn[:4]}-{fn[4:6]}-{fn[6:8]}"
             dates.append(date)
-            agg, futd = {}, {}
+            agg, futd, atmc = {}, {}, {}
             with gzip.open(os.path.join(self.cache, fn), "rt", encoding="utf-8", newline="") as f:
                 for x in csv.DictReader(f):
                     tok, sym = x["tok"], x["sym"]
@@ -158,6 +159,10 @@ class History:
                     if len(c["lab_hist"]) > 10:
                         del c["lab_hist"][0]
                     c["last_d"], c["last_oi"], c["last_close"] = date, oi, cl
+                    if x["opt"] in ("CE", "PE") and x["exp"] > date and cl > 0:
+                        # ATM-IV candidates: per stock / expiry / strike keep CE & PE close
+                        atmc.setdefault(sym, {}).setdefault(x["exp"], {}).setdefault(_f(x["strike"]), {})[x["opt"]] = cl
+                        atmc[sym]["_u"] = _f(x["undl"])
                     if x["opt"] == "FUT":
                         futd.setdefault(sym, []).append((x["exp"], oi, choi, cl, pv, vol, _f(x["undl"])))
                         continue
@@ -173,6 +178,17 @@ class History:
                     a[side + "_vol"] += vol
                     if lab:
                         a[side + "_lab"][lab] += abs(choi)
+            for sym, ex in atmc.items():
+                u = ex.pop("_u", 0)
+                if not u:
+                    continue
+                for slot, e in enumerate(sorted(ex)[:2]):          # front, next expiry
+                    both = [(abs(k - u), k, v) for k, v in ex[e].items() if "CE" in v and "PE" in v]
+                    if not both:
+                        continue
+                    _, k, v = min(both)
+                    T = max((datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(date, "%Y-%m-%d")).days, 0.25) / 365
+                    iv_rows.append((sym, date, slot, u, k, T, v["CE"], v["PE"]))
             for sym, fl in futd.items():
                 a = agg.get(sym)
                 if a is None:
@@ -191,12 +207,51 @@ class History:
                 stock_days[sym].append(a)
         # drop expired contracts (keeps memory small); ATH/ATL only matter for live ones
         live = {t: c for t, c in contracts.items() if c["exp"] >= today_s}
+        iv_hist = self._iv_history(iv_rows)
         with self._lock:
-            self.contracts, self.stock_days, self.dates = live, dict(stock_days), dates
+            self.contracts, self.stock_days, self.dates, self.iv_hist = live, dict(stock_days), dates, iv_hist
         self.loaded_at = time.time()
         self.status = (f"{len(dates)} trading days ({dates[0]} → {dates[-1]})" if dates else "no bhavcopy data") + \
                       (f" · {errs} download errors" if errs else "")
         return self
+
+    # ---------------- implied-volatility history (ATM, from closing prices) ----------------
+    @staticmethod
+    def _iv_history(rows):
+        if not rows:
+            return {}
+        from trackers.ivcalc import iv_greeks
+        S = [r[3] for r in rows] * 2
+        K = [r[4] for r in rows] * 2
+        T = [r[5] for r in rows] * 2
+        P = [r[6] for r in rows] + [r[7] for r in rows]
+        C = [True] * len(rows) + [False] * len(rows)
+        iv = iv_greeks(S, K, T, P, C)["iv"]
+        n = len(rows)
+        per = {}
+        for i, (sym, date, slot, *_rest) in enumerate(rows):
+            vals = [v for v in (iv[i], iv[i + n]) if v == v]       # drop NaN
+            if not vals:
+                continue
+            per.setdefault(sym, {}).setdefault(date, [None, None])[slot] = round(float(sum(vals) / len(vals)), 2)
+        return {s: [(d, v[0], v[1]) for d, v in sorted(dd.items()) if v[0] is not None] for s, dd in per.items()}
+
+    def iv_stats(self, sym, cur=None):
+        """IV rank / percentile of today's ATM IV vs the stored history (default: last close)."""
+        h = self.iv_hist.get(sym.upper())
+        if not h:
+            return None
+        vals = [x[1] for x in h]
+        now = cur if cur is not None else vals[-1]
+        lo, hi = min(vals), max(vals)
+        last = h[-1]
+        rank = max(0, min(100, round((now - lo) / (hi - lo) * 100))) if hi > lo else None
+        return {"iv_now": round(now, 2), "iv_rank": rank,
+                "iv_extreme": "NEW HIGH" if now > hi else "NEW LOW" if now < lo else None,
+                "iv_pctile": round(sum(1 for v in vals if v < now) / len(vals) * 100), "iv_min": lo, "iv_max": hi,
+                "iv_days": len(vals), "iv_next": last[2],
+                "iv_term": round(last[2] - last[1], 2) if last[2] is not None else None,
+                "iv_series": [(d, v) for d, v, _ in h[-30:]]}
 
     # ---------------- per-contract ----------------
     def contract(self, tok, today=None):

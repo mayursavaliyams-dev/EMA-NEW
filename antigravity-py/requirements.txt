@@ -6,3 +6,4 @@ numpy
 # optional (not required for paper run): redis, pandas, scipy, apscheduler
 websockets
 protobuf>=6.33
+openpyxl

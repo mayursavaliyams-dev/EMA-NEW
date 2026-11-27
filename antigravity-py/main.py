@@ -209,6 +209,93 @@ def tracker_futures():
     return {"futures": tracker.futures()}
 
 
+@app.get("/api/tracker/participants")
+def tracker_participants():
+    """FII / DII / Pro / Client positions (NSE participant-wise OI): net long, change vs previous day, streak."""
+    return tracker.extra.participant_view() if tracker.extra else {"date": None, "rows": []}
+
+
+@app.get("/api/tracker/sectors")
+def tracker_sectors():
+    """Sector heatmap: average move, up/down stocks, OI change, futures buildup counts."""
+    return {"sectors": tracker.sectors()}
+
+
+@app.get("/api/tracker/deals")
+def tracker_deals(fo_only: bool = True):
+    """Today's NSE bulk / block deals (F&O stocks only by default)."""
+    if not tracker.extra:
+        return {"date": None, "deals": []}
+    d = tracker.extra.deals
+    rows = d["bulk"] + d["block"]
+    if fo_only:
+        rows = [x for x in rows if x["symbol"] in tracker.u.stocks]
+    return {"date": d["date"], "deals": rows}
+
+
+@app.get("/api/tracker/stock")
+def tracker_stock(symbol: str):
+    """Everything for one stock: analytics, IV history, delivery, deals, futures."""
+    sym = symbol.upper()
+    return {"symbol": sym, "analytics": tracker.anal.get(sym, {}),
+            "iv": tracker.hist.iv_stats(sym, tracker.anal.get(sym, {}).get("atm_iv")) if tracker.hist else None,
+            "extra": tracker.extra.info(sym) if tracker.extra else None, "futures": tracker.fut_row(sym)}
+
+
+@app.post("/api/tracker/telegram/test")
+def tracker_telegram_test():
+    if not tracker.tg.enabled():
+        return JSONResponse({"error": "telegram.json missing (bot_token + chat_id)"}, status_code=400)
+    try:
+        tracker.tg._send("✅ Antigravity tracker: Telegram alerts are working.")
+        return {"status": "sent"}
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
+@app.get("/api/tracker/export")
+def tracker_export(what: str = "alerts", fmt: str = "csv"):
+    """Download alerts | trends | summary | history | futures | sectors | participants as CSV (or xlsx)."""
+    import io, csv as _csv, json as _json
+    from fastapi.responses import Response
+    src = {"alerts": lambda: list(tracker.alerts)[::-1], "trends": lambda: tracker.trend_list(limit=5000),
+           "summary": tracker.summary, "futures": tracker.futures, "sectors": tracker.sectors,
+           "history": lambda: tracker.hist.stock_table() if tracker.hist else [],
+           "participants": lambda: (tracker.extra.participant_view()["rows"] if tracker.extra else [])}
+    if what not in src:
+        return JSONResponse({"error": f"what must be one of {sorted(src)}"}, status_code=400)
+    rows = src[what]() or []
+    flat = [{k: (_json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict, set, tuple)) else v)
+             for k, v in r.items() if k not in ("news",) or what == "alerts"} for r in rows]
+    cols = []
+    for r in flat:
+        for k in r:
+            if k not in cols:
+                cols.append(k)
+    stamp = datetime.now(IST).strftime("%Y%m%d_%H%M")
+    if fmt == "xlsx":
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return JSONResponse({"error": "pip install openpyxl for xlsx (CSV works without it)"}, status_code=400)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = what[:30]
+        ws.append(cols)
+        for r in flat:
+            ws.append([r.get(c) for c in cols])
+        buf = io.BytesIO()
+        wb.save(buf)
+        return Response(buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f'attachment; filename="tracker_{what}_{stamp}.xlsx"'})
+    buf = io.StringIO()
+    w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(flat)
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="tracker_{what}_{stamp}.csv"'})
+
+
 @app.get("/api/tracker/trends")
 def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
     """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""
