@@ -46,7 +46,7 @@ HARD_CAP = 25000
 
 SETTINGS = {
     "TRACKER_ENABLED": True,
-    "trkProvider": "auto",      # auto | dhan | upstox   (auto = Dhan if dhan.json works, else Upstox)
+    "trkProvider": "auto",      # auto | dhan | upstox   (auto = Dhan only if dhan.json exists, never env vars alone; else Upstox)
     "trkBudget": 25000,         # strikes to track (Dhan: all live; Upstox: 5000 live + rest via REST)
     "trkDhanConnections": 5,    # Dhan allows 5 WS connections x 5000 instruments
     "trkSpikePct": 20,          # premium move % ...
@@ -547,8 +547,10 @@ class StockOptionsTracker:
         d, u = self.providers.get("dhan"), self.providers.get("upstox")
         if want == "upstox" or not d:
             p = u
-        elif want == "dhan" or d.available():
-            p = d if d.available() or want == "dhan" else u
+        elif want == "dhan":
+            p = d
+        elif d.auto_ok() if hasattr(d, "auto_ok") else d.available():
+            p = d                                  # auto: only with dhan.json, never env vars alone
         else:
             p = u
         if p is not self.p:
