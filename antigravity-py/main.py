@@ -15,13 +15,19 @@ from connectors import UpstoxConnector
 from engines import StrangleEngine
 from greeks import greeks
 import sizing
+from trackers.news import NewsHub
+from trackers.stock_options import StockOptionsTracker, SETTINGS as TRK_SETTINGS
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 IST = timezone(timedelta(hours=5, minutes=30))
 
 conn = UpstoxConnector()
 engine = StrangleEngine(conn)
+news_hub = NewsHub()
+tracker = StockOptionsTracker(conn, news_hub)   # side tracker: display only, no orders
 app = FastAPI(title="Antigravity-Py", version="0.1")
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=2000)     # JSON tables compress ~8x
 
 
 def market_open():
@@ -169,6 +175,250 @@ def api_sizing(symbol: str = "NIFTY", capital: float = 100000, structure: str = 
             "margin_per_lot": sizing.MARGIN.get(symbol.upper(), {}).get(structure)}
 
 
+# ---------------- stock-options side tracker (display only) ----------------
+@app.get("/api/tracker/status")
+def tracker_status():
+    return tracker.status()
+
+
+@app.get("/api/tracker/alerts")
+def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12):
+    out = list(tracker.alerts)
+    if status:
+        out = [a for a in out if a["status"] == status.upper()]
+    if symbol:
+        out = [a for a in out if a["symbol"] == symbol.upper()]
+    if dir:
+        out = [a for a in out if a.get("dir") == dir.upper()]
+    res = []
+    for a in out[::-1][:limit]:
+        if len(a.get("legs") or []) > max_legs:          # keep payloads small: merged alerts can hold many legs
+            a = {**a, "legs": a["legs"][:max_legs], "legs_more": len(a["legs"]) - max_legs}
+        res.append(a)
+    return {"alerts": res}
+
+
+@app.get("/api/tracker/board")
+def tracker_board(symbol: str = "", limit: int = 60, sort: str = "move", expiry: str = "", sign: str = ""):
+    """symbol -> full strike ladder (front expiry, or ?expiry=); else top rows by
+    sort = move | volume | oi | unusual | iv, optionally sign = UP | DOWN."""
+    return {"symbol": symbol.upper() or None,
+            "expiries": tracker.expiries(symbol) if symbol else [],
+            "rows": tracker.board(symbol or None, min(limit, 500), sort, expiry or None, sign.upper() or None)}
+
+
+@app.get("/api/tracker/summary")
+def tracker_summary():
+    """Per-stock totals: CE/PE OI, PCR, OI change, volume, OI support/resistance, max-volume strike."""
+    return {"stocks": tracker.summary(max_age=2.0)}
+
+
+@app.get("/api/tracker/futures")
+def tracker_futures():
+    """Front-month stock futures: price, basis (premium/discount), OI change, buildup, rollover %."""
+    return {"futures": tracker.futures()}
+
+
+@app.get("/api/tracker/participants")
+def tracker_participants():
+    """FII / DII / Pro / Client positions (NSE participant-wise OI): net long, change vs previous day, streak."""
+    return tracker.extra.participant_view() if tracker.extra else {"date": None, "rows": []}
+
+
+@app.get("/api/tracker/sectors")
+def tracker_sectors():
+    """Sector heatmap: average move, up/down stocks, OI change, futures buildup counts."""
+    return {"sectors": tracker.sectors()}
+
+
+@app.get("/api/tracker/deals")
+def tracker_deals(fo_only: bool = True):
+    """Today's NSE bulk / block deals (F&O stocks only by default)."""
+    if not tracker.extra:
+        return {"date": None, "deals": []}
+    d = tracker.extra.deals
+    rows = d["bulk"] + d["block"]
+    if fo_only:
+        rows = [x for x in rows if x["symbol"] in tracker.u.stocks]
+    return {"date": d["date"], "deals": rows}
+
+
+@app.get("/api/tracker/stock")
+def tracker_stock(symbol: str):
+    """Everything for one stock: analytics, IV history, delivery, deals, futures."""
+    sym = symbol.upper()
+    return {"symbol": sym, "analytics": tracker.anal.get(sym, {}),
+            "iv": tracker.hist.iv_stats(sym, tracker.anal.get(sym, {}).get("atm_iv")) if tracker.hist else None,
+            "extra": tracker.extra.info(sym) if tracker.extra else None, "futures": tracker.fut_row(sym)}
+
+
+@app.post("/api/tracker/telegram/test")
+def tracker_telegram_test():
+    if not tracker.tg.enabled():
+        return JSONResponse({"error": "telegram.json missing (bot_token + chat_id)"}, status_code=400)
+    try:
+        tracker.tg._send("✅ Antigravity tracker: Telegram alerts are working.")
+        return {"status": "sent"}
+    except Exception as e:
+        return JSONResponse({"error": str(e)[:200]}, status_code=502)
+
+
+@app.get("/api/tracker/export")
+def tracker_export(what: str = "alerts", fmt: str = "csv"):
+    """Download alerts | trends | summary | history | futures | sectors | participants as CSV (or xlsx)."""
+    import io, csv as _csv, json as _json
+    from fastapi.responses import Response
+    src = {"alerts": lambda: list(tracker.alerts)[::-1], "trends": lambda: tracker.trend_list(limit=5000),
+           "summary": tracker.summary, "futures": tracker.futures, "sectors": tracker.sectors,
+           "history": lambda: tracker.hist.stock_table() if tracker.hist else [],
+           "participants": lambda: (tracker.extra.participant_view()["rows"] if tracker.extra else [])}
+    if what not in src:
+        return JSONResponse({"error": f"what must be one of {sorted(src)}"}, status_code=400)
+    rows = src[what]() or []
+    flat = [{k: (_json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict, set, tuple)) else v)
+             for k, v in r.items() if k not in ("news",) or what == "alerts"} for r in rows]
+    cols = []
+    for r in flat:
+        for k in r:
+            if k not in cols:
+                cols.append(k)
+    stamp = datetime.now(IST).strftime("%Y%m%d_%H%M")
+    if fmt == "xlsx":
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            return JSONResponse({"error": "pip install openpyxl for xlsx (CSV works without it)"}, status_code=400)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = what[:30]
+        ws.append(cols)
+        for r in flat:
+            ws.append([r.get(c) for c in cols])
+        buf = io.BytesIO()
+        wb.save(buf)
+        return Response(buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f'attachment; filename="tracker_{what}_{stamp}.xlsx"'})
+    buf = io.StringIO()
+    w = _csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    w.writerows(flat)
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="tracker_{what}_{stamp}.csv"'})
+
+
+@app.get("/api/tracker/trends")
+def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
+    """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""
+    return {"trends": tracker.trend_list(status or None, symbol or None, limit)}
+
+
+@app.get("/api/tracker/history")
+def tracker_history(window: int = 5):
+    """Multi-day (NSE bhavcopy) OI build per stock: 5/20-day OI change per side, streaks, repeated activity."""
+    h = tracker.hist
+    return {"status": h.status if h else "off", "dates": (h.dates[-1:] if h else []),
+            "stocks": h.stock_table(max(2, min(window, 20))) if h else []}
+
+
+@app.get("/api/tracker/history/stock")
+def tracker_history_stock(symbol: str, days: int = 30, n: int = 5):
+    """Day-by-day record for one stock + strikes where OI was built most over the last n days."""
+    h = tracker.hist
+    if not h:
+        return JSONResponse({"error": "history off"}, status_code=404)
+    sym = symbol.upper()
+    return {"symbol": sym, "days": h.stock_record(sym, max(1, min(days, 120))),
+            "strikes": h.strike_build(sym, max(1, min(n, 20)), 30)}
+
+
+@app.get("/api/tracker/candles")
+def tracker_candles(key: str = "", symbol: str = "", interval: str = "1"):
+    """Candles + session VWAP + volume + OI for one strike (key) or the underlying (symbol)."""
+    if interval not in ("1", "3", "5", "15", "25", "30", "60"):
+        return JSONResponse({"error": "bad interval"}, status_code=400)
+    if symbol and not key:
+        s = tracker.u.stocks.get(symbol.upper())
+        if not s:
+            return JSONResponse({"error": "unknown symbol"}, status_code=404)
+        key = s["underlying_key"]
+    elif key not in tracker.sel:
+        return JSONResponse({"error": "not a tracked strike"}, status_code=404)
+    try:
+        c = tracker.candles(key, interval)
+    except Exception as e:
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"[:300]}, status_code=502)
+    m = tracker.sel.get(key, {})
+    return {"key": key, "meta": m, "live": tracker.latest.get(key, {}), "interval": interval, "candles": c}
+
+
+@app.get("/api/tracker/symbols")
+def tracker_symbols():
+    return {"symbols": tracker.symbols()}
+
+
+_news_busy = set()
+
+
+def _news_refresh(sym, name):
+    import threading
+    if sym in _news_busy:
+        return
+    _news_busy.add(sym)
+
+    def run():
+        try:
+            news_hub.news_for(sym, name)
+        finally:
+            _news_busy.discard(sym)
+    threading.Thread(target=run, daemon=True).start()
+
+
+@app.get("/api/tracker/news")
+def tracker_news(symbol: str = "", hours: float = 24):
+    since = datetime.now(IST).timestamp() - hours * 3600
+    if symbol:
+        sym = symbol.upper()
+        s = tracker.u.stocks.get(sym, {})
+        # never block the request on the network: serve the cache, refresh it in the background
+        _news_refresh(sym, s.get("name", sym))
+        return {"items": news_hub.news_for(sym, s.get("name", sym), since_ts=since, fetch=False)}
+    fo = set(tracker.u.stocks) or None
+    return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
+
+
+@app.get("/api/tracker/settings")
+def tracker_settings_get():
+    return {k: config.cfg(k) for k in TRK_SETTINGS}
+
+
+@app.post("/api/tracker/settings")
+def tracker_settings_set(body: dict):
+    bad = [k for k in body if k not in TRK_SETTINGS]
+    if bad:
+        return JSONResponse({"error": f"unknown settings: {bad}"}, status_code=400)
+    clean = {}
+    for k, v in body.items():
+        d = TRK_SETTINGS[k]
+        if k == "trkProvider":
+            if str(v).lower() not in ("auto", "dhan", "upstox"):
+                return JSONResponse({"error": "trkProvider must be auto | dhan | upstox"}, status_code=400)
+            clean[k] = str(v).lower()
+            continue
+        try:
+            clean[k] = bool(v) if isinstance(d, bool) else type(d)(v)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": f"bad value for {k}"}, status_code=400)
+        if not isinstance(d, bool) and clean[k] < 0:
+            return JSONResponse({"error": f"{k} must be >= 0"}, status_code=400)
+    if "trkBudget" in clean:
+        clean["trkBudget"] = min(clean["trkBudget"], 25000)
+    if "trkDhanConnections" in clean:
+        clean["trkDhanConnections"] = max(1, min(clean["trkDhanConnections"], 5))
+    config.save_overrides(clean)
+    tracker._t_rebal = 0          # apply budget / window changes on the next pass
+    return {"status": "ok", **{k: config.cfg(k) for k in TRK_SETTINGS}}
+
+
 # ---------------- engine loop ----------------
 async def engine_loop():
     while True:
@@ -188,6 +438,7 @@ async def engine_loop():
 @app.on_event("startup")
 async def _startup():
     asyncio.create_task(engine_loop())
+    tracker.start()
     print(f"[antigravity-py] up — mode={config.cfg('TRADE_MODE')} "
           f"strangle={config.cfg('STRANGLE_ENGINE_ENABLED')}")
 

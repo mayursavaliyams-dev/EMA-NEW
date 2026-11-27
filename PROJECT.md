@@ -89,6 +89,68 @@ are context on the dashboard; they are not alpha. Do not assume the bot acts on 
 
 ---
 
+## 4b. Stock-options side tracker (display only)
+
+`antigravity-py/trackers/` — tab **🔎 Stock Options + News** on :8000. Never places orders and
+never feeds the strangle engine.
+
+- **Providers** (`trackers/providers.py`, setting `trkProvider` = auto | dhan | upstox):
+  - **Dhan** (used automatically when `antigravity-py/dhan.json` = `{"client_id": "...",
+    "access_token": "..."}` works): 5 WebSocket connections x 5000 = **25,000 strikes live** in
+    FULL mode — LTP, VWAP (avg price), volume, OI, OI day high/low, prev OI, OHLC, buy/sell qty.
+    Packet layouts follow Dhan's official SDK (dhanhq 2.3.0). An expired/invalid token (codes
+    806-809) stops Dhan and the tracker falls back to Upstox.
+  - **Upstox** (backup): WebSocket ticks for the 5,000 strikes nearest ATM + REST full quotes for
+    all 25,000 (OI, OI hi/lo, VWAP, OHLC, volume), paced to <= 40 calls/min. Upstox gives no
+    previous-day OI, so "OI chg" is blank on Upstox.
+- **Universe:** all 218 F&O stocks, front expiry first (Dhan lists ~27k front-expiry legs, Upstox
+  ~12.6k — the rest then comes from the next/far expiry), strikes nearest spot, water-filled.
+  Re-centred every 3 min (subscription diffed); masters re-downloaded conditionally; Upstox also
+  pulls `/v2/option/contract` near the strike-list edge for intraday new strikes.
+- **Per strike:** LTP, VWAP, day high/low + range, volume, Vol/OI, OI, OI day hi/lo, OI change,
+  live buildup (Long/Short buildup, Short covering, Long unwinding), IV + delta/gamma/theta/vega
+  (`trackers/ivcalc.py`, vectorised, same model as `greeks.py`), bid/ask spread, last-trade
+  aggressor, buy/sell qty, **all-time high/low** (since listing) and 5/20-day OI build.
+- **Multi-day history** (`trackers/history.py`): official NSE F&O bhavcopy, 100-day lookback,
+  slim gzip cache in `data/bhav_slim/`. Per stock: CE/PE OI 5d/20d change, consecutive OI-up days,
+  the same activity repeated day after day; per strike: OI built over N days; per contract: ATH/ATL
+  with dates. Also supplies previous-day OI on Upstox.
+- **Stock futures:** front + next month for all 218 stocks are streamed (436 slots reserved): price,
+  basis (premium/discount %), OI change vs previous day, futures buildup label, rollover %. History
+  (bhavcopy STF rows) adds futures OI 5/20-day change, OI streak and repeated daily activity.
+  Alerts: FUT_BUILDUP (price >= 1 % and OI >= 5 %), BASIS flip (premium <-> discount).
+- **Market & EOD data** (`trackers/nse_extra.py`, cached in `data/nse_extra/`): FII/DII/Pro/Client
+  participant OI (20 days, net + change + streak), delivery % per stock (vs 5/20-day average), today's
+  bulk/block deals, sector map (Nifty 500 list) → sector heatmap. Alerts: DELIVERY (accumulation /
+  distribution), DEAL, FII (daily, flags an FII flip).
+- **Per-stock analytics:** IV Rank / IV Percentile (ATM IV history rebuilt from 100 days of bhavcopy
+  closes) + IV term (next − front), max pain (+ MAXPAIN shift alert), GEX ₹cr per 1 % + gamma-flip
+  strike (dealer-convention estimate), 25-delta IV skew, expected move from the ATM straddle (+ EXP_MOVE
+  alert when spot breaks the day's implied range).
+- **Telegram** (`trackers/notify.py`): create `antigravity-py/telegram.json` = `{"bot_token": "...",
+  "chat_id": "..."}` (gitignored); kinds pushed = setting `trkTelegramKinds`; test button in the tab.
+- **Export:** `/api/tracker/export?what=alerts|trends|summary|history|futures|sectors|participants&fmt=xlsx|csv`
+  (buttons in the tab).
+- **Performance** (measured with 25,000 live instruments): Dhan packet parsing 39k → 80k packets/s
+  (precompiled structs, no copies, detectors only on changed values); top-strike views 0.8–1.2 s →
+  0.06–0.15 s (rank on a cheap key, build rows only for the top N); news never blocks a request
+  (cache + background refresh); history incremental with a pickled state (restart 3.9 s, 30-min refresh
+  0.6 s instead of 25 s); dashboard refreshes heavy tables every 15 s, news once a minute, never
+  overlaps calls; gzip on API responses (~8x smaller).
+- **Context** (`trackers/nse_context.py`): F&O ban list, MWPL usage %, corporate-event calendar.
+- **Trends** (`trackers/trend.py`): per strike and per stock, on 3-min candles — start = EMA5>EMA13
+  + above VWAP + 3 green candles + min move from the swing low; end = close below EMA13/VWAP or 50 %
+  give-back. Each record keeps where it started, when it was confirmed, why, candles, green/red,
+  one-sided %, max pull-back, and why/when it ended — saved to `data/tracker_trends.json`.
+- **Alerts** (saved to `data/tracker_alerts.json`, each with a plain-language *reason* and the
+  stock's *first alert of the day*): PRICE, OI, VOLUME burst, UNUSUAL Vol/OI, IV spike, ALL-TIME
+  HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
+  breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
+  NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
+- **Test:** `py test_tracker.py` (offline, 107 checks incl. a WebSocket round-trip with a fake Dhan
+  feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
+- Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
+
 ## 5. File map
 
 ```
