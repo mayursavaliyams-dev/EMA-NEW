@@ -756,12 +756,44 @@ def test_board_fast_topn():
     check("5 top-strike views over 25,000 strikes < 0.5 s", time.perf_counter() - t0 < 0.5, f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
 
 
+def test_auto_never_dhan_from_env_only():
+    """trkProvider=auto must NOT pick Dhan from DHAN_* env vars alone (live bot owns those + all 5 WS)."""
+    old_env = {k: os.environ.get(k) for k in ("DHAN_CLIENT_ID", "DHAN_ACCESS_TOKEN")}
+    old_path, old_prov = P.DHAN_CRED_PATH, SET["trkProvider"]
+    try:
+        os.environ["DHAN_CLIENT_ID"], os.environ["DHAN_ACCESS_TOKEN"] = "1100", "envtok"
+        P.DHAN_CRED_PATH = os.path.join(TMP, "no_dhan.json")
+        if os.path.exists(P.DHAN_CRED_PATH):
+            os.remove(P.DHAN_CRED_PATH)
+
+        def pick(mode):
+            SET["trkProvider"] = mode
+            d = P.DhanProvider()
+            d.start_feed = lambda *a: None
+            t = T.StockOptionsTracker(None, FakeNews(), detector=T.Detector(get=lambda k: SET[k]),
+                                      providers={"upstox": FakeProvider("upstox"), "dhan": d},
+                                      history=False, context=False, extra=False)
+            return t.choose_provider().name, d
+        name, d = pick("auto")
+        check("auto + DHAN env vars only (no dhan.json) -> upstox", name == "upstox" and d.available())
+        check("explicit trkProvider=dhan still honours env vars", pick("dhan")[0] == "dhan")
+        with open(P.DHAN_CRED_PATH, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "filetok"}, f)
+        check("auto + dhan.json present -> dhan", pick("auto")[0] == "dhan")
+        check("trkProvider=upstox wins over dhan.json", pick("upstox")[0] == "upstox")
+    finally:
+        os.remove(P.DHAN_CRED_PATH) if os.path.exists(P.DHAN_CRED_PATH) else None
+        P.DHAN_CRED_PATH, SET["trkProvider"] = old_path, old_prov
+        for k, v in old_env.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

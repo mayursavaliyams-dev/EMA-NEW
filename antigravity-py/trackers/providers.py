@@ -165,6 +165,19 @@ class DhanProvider:
         c = self.creds()
         return bool(c.get("access_token") and c.get("client_id")) and not self.fatal
 
+    def auto_ok(self):
+        """May trkProvider=auto pick Dhan? Only with explicit creds (dhan.json or passed in).
+        DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN env vars alone are NOT enough: a live bot on the same
+        account may own them and all 5 Dhan WS connections (a 6th -> error 805 kicks the bot)."""
+        if self._creds:
+            return self.available()
+        try:
+            with open(DHAN_CRED_PATH, "r", encoding="utf-8") as f:
+                has_file = bool(json.load(f).get("access_token"))
+        except Exception:
+            has_file = False
+        return has_file and self.available()
+
     def _h(self):
         c = self.creds()
         return {"access-token": c.get("access_token", ""), "client-id": str(c.get("client_id", "")),
