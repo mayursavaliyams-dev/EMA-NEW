@@ -38,3 +38,6 @@ Thumbs.db
 
 # ---- python venv ----
 .venv/
+
+# ---- mock test data ----
+data-mock/

@@ -37,10 +37,13 @@ if not defined PY (
 %PY% -m venv .venv
 if errorlevel 1 ( echo  [X] Setup nishfal. & pause & exit /b 1 )
 :have_venv
-if not exist ".venv\installed.ok" (
+rem --- install / update packages when requirements.txt changed (copy kept in .venv) ---
+fc /b requirements.txt ".venv\requirements.installed" >nul 2>&1
+if errorlevel 1 (
+  echo  Packages install / update thay chhe...
   ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt
   if errorlevel 1 ( echo  [X] Packages install na thaya - internet check karo. & pause & exit /b 1 )
-  echo ok> ".venv\installed.ok"
+  copy /y requirements.txt ".venv\requirements.installed" >nul
 )
 
 rem --- Dhan token: ask once if missing ---
@@ -49,11 +52,17 @@ if not exist "dhan.json" (
   if errorlevel 1 ( pause & exit /b 1 )
 )
 
+rem --- keep the Dhan token alive (renews it when ~20 h old; never logs in afresh) ---
+".venv\Scripts\python.exe" dhan_setup.py --renew
+
 rem --- safety settings: paper only, Dhan only, 5 connections ---
+rem "TRACKER_START.bat now" = test right now even when the market is closed
+set "ALWAYS=False"
+if /i "%~1"=="now" set "ALWAYS=True"
 set "DHAN_CLIENT_ID="
 set "DHAN_ACCESS_TOKEN="
 set "PYTHONIOENCODING=utf-8"
-".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan', 'trkDhanConnections': 5})"
+".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan', 'trkDhanConnections': 5, 'trkAlwaysOn': %ALWAYS%})"
 
 echo.
 echo  ==========================================================

@@ -23,7 +23,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 conn = UpstoxConnector()
 engine = StrangleEngine(conn)
-news_hub = NewsHub()
+news_hub = NewsHub(store_dir=os.path.join(config.DATA, "news"), keep_days=int(config.cfg("trkKeepDays") or 35))
 tracker = StockOptionsTracker(conn, news_hub)   # side tracker: display only, no orders
 app = FastAPI(title="Antigravity-Py", version="0.1")
 from fastapi.middleware.gzip import GZipMiddleware
@@ -182,8 +182,9 @@ def tracker_status():
 
 
 @app.get("/api/tracker/alerts")
-def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12):
-    out = list(tracker.alerts)
+def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12, date: str = ""):
+    """date=YYYY-MM-DD reads that day's saved alerts (kept trkKeepDays, one monthly expiry cycle)."""
+    out = tracker.alerts_for_day(date) if date else list(tracker.alerts)
     if status:
         out = [a for a in out if a["status"] == status.upper()]
     if symbol:
@@ -307,9 +308,19 @@ def tracker_export(what: str = "alerts", fmt: str = "csv"):
 
 
 @app.get("/api/tracker/trends")
-def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
+def tracker_trends(status: str = "", symbol: str = "", limit: int = 300, date: str = ""):
     """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""
+    if date:
+        out = [t for t in reversed(tracker.trends_for_day(date))
+               if (not status or t.get("status") == status.upper()) and (not symbol or t.get("symbol") == symbol.upper())]
+        return {"trends": out[:limit]}
     return {"trends": tracker.trend_list(status or None, symbol or None, limit)}
+
+
+@app.get("/api/tracker/days")
+def tracker_days():
+    """Days with saved alerts / trends (newest first) and how long they are kept."""
+    return {"days": tracker.history_days(), "keep_days": config.cfg("trkKeepDays") or 35}
 
 
 @app.get("/api/tracker/history")
@@ -383,7 +394,94 @@ def tracker_news(symbol: str = "", hours: float = 24):
         _news_refresh(sym, s.get("name", sym))
         return {"items": news_hub.news_for(sym, s.get("name", sym), since_ts=since, fetch=False)}
     fo = set(tracker.u.stocks) or None
-    return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
+    return {"items": news_hub.latest_nse(fo, limit=300, since_ts=since)}
+
+
+@app.get("/api/tracker/news/dhan-raw")
+def tracker_news_dhan_raw():
+    """Last raw Dhan news reply + how it was parsed (to confirm Dhan's real field names)."""
+    if not news_hub.dhan_enabled():
+        return {"enabled": False, "note": "Dhan news is used only when the tracker runs on Dhan (trkProvider=dhan)"}
+    if news_hub.dhan_raw is None:
+        news_hub.poll_dhan(force=True)
+    raw = news_hub.dhan_raw or {}
+    from trackers.news import dhan_news_items, parse_dhan_news
+    items = dhan_news_items(raw.get("reply"))
+    return {"enabled": True, "polls": news_hub.dhan_polls, "error": news_hub.errors.get("Dhan"),
+            "fields_seen": sorted({k for it in items for k in it})[:60], "raw_count": len(items),
+            "parsed_sample": parse_dhan_news(raw.get("reply"), tracker._sid_map())[:5],
+            "raw_sample": items[:3], "request": raw.get("request"), "at": raw.get("at")}
+
+
+@app.get("/api/tracker/selfcheck")
+def tracker_selfcheck():
+    """One-click recheck of everything the tracker depends on. Each row: ok | warn | fail + plain reason."""
+    import time as _t
+    out = []
+
+    def add(name, state, detail=""):
+        out.append({"check": name, "state": state, "detail": str(detail)[:240]})
+    st = tracker.status()
+    active = st.get("active")
+    add("Paper mode (no orders)", "ok" if config.cfg("TRADE_MODE") == "paper" else "fail", config.cfg("TRADE_MODE"))
+    add("Tracker on", "ok" if st.get("enabled") else "fail")
+    want = str(config.cfg("trkProvider") or "auto")
+    add("Data source = Dhan", "ok" if want == "dhan" else "warn", f"setting trkProvider={want}, using {st.get('provider') or '--'}")
+    d = tracker.providers.get("dhan")
+    if d is not None:
+        age = d.token_age_h() if hasattr(d, "token_age_h") else None
+        add("Dhan token present", "ok" if d.available() else "fail",
+            "token loaded" if d.available() else (st.get("dhan_error") or "no token: run DHAN_TOKEN.bat"))
+        if age is not None:
+            add("Dhan token age", "ok" if age < 20 else "warn" if age < 24 else "fail",
+                f"{age:.1f} h old (renewed automatically at ~20 h; expires ~24 h)")
+        add("Dhan feed error", "fail" if st.get("dhan_error") else "ok", st.get("dhan_error") or "none")
+    if not active:
+        add("Market hours", "warn", "market closed - live checks skipped (TRACKER_TEST_NOW.bat runs them now)")
+    else:
+        feed = st.get("feed") or ""
+        import re as _re
+        m = _re.search(r"(\d+)/(\d+) connections", feed)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            add("Live feed connected", "ok" if a == b else "warn" if a else "fail",
+                feed + ("" if a == b else " (some connections still connecting / dropped)"))
+        else:
+            add("Live feed connected", "ok" if "connected" in feed.lower() or "ws" in feed.lower() else "fail", feed)
+        t0 = st.get("ticks") or 0
+        _t.sleep(3)
+        t1 = tracker.status().get("ticks") or 0
+        add("Prices arriving (3 s)", "ok" if t1 > t0 else "fail", f"+{t1 - t0} updates in 3 s")
+        add("Strikes tracked / live", "ok" if st.get("instruments_live") else "fail",
+            f"{st.get('instruments_tracked')} tracked, {st.get('instruments_live')} live, {st.get('stocks_tracked')} stocks")
+        add("IV / greeks", "ok" if st.get("greeks") else "warn", f"{st.get('greeks')} strikes")
+    h = str(st.get("history") or "")
+    add("History (NSE bhavcopy)", "ok" if "trading days" in h else "warn", h or "off")
+    ctx = st.get("context") or {}
+    add("F&O ban list", "ok" if ctx.get("ban_date") and not ctx.get("errors") else "warn",
+        f"{ctx.get('ban_date') or '--'}: {', '.join(ctx.get('ban') or []) or 'none'} {ctx.get('errors') or ''}")
+    add("FII/DII, deals, delivery (NSE)", "fail" if st.get("extra_errors") else "ok", st.get("extra_errors") or "no errors")
+    ne = st.get("news_errors") or {}
+    for src in ("NSE", "Google News", "Dhan"):
+        if src == "Dhan" and not news_hub.dhan_enabled():
+            add("News: Dhan", "warn", "used only when the tracker runs on Dhan")
+            continue
+        add(f"News: {src}", "fail" if src in ne else "ok", ne.get(src) or "no errors")
+    if news_hub.dhan_enabled():
+        add("Dhan news reply", "ok" if news_hub.dhan_polls else "warn", f"{news_hub.dhan_polls} replies so far")
+    try:
+        probe = os.path.join(config.DATA, ".write-test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        days = tracker.history_days()
+        add("Saving history (35-day files)", "ok", f"{len(days)} day(s) saved, kept {config.cfg('trkKeepDays')} days")
+    except Exception as e:
+        add("Saving history (35-day files)", "fail", e)
+    errs = st.get("errors") or {}
+    add("Tracker errors", "fail" if errs else "ok", errs or "none")
+    n = {k: sum(1 for x in out if x["state"] == k) for k in ("ok", "warn", "fail")}
+    return {"time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), "summary": n, "checks": out}
 
 
 @app.get("/api/tracker/settings")
@@ -458,4 +556,6 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000)
+    # access_log off: the dashboard polls every few seconds; logging each request grows tracker.log by
+    # hundreds of MB a week when the tracker runs unattended for days
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, access_log=False)

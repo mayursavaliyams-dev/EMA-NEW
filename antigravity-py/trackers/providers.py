@@ -130,7 +130,10 @@ class DhanProvider:
             self.API = api
         self._http = httpx.Client(timeout=20)
         self._rl_quote = _RateLimit(1)       # Dhan: market-quote APIs 1 req/sec
-        self._rl_data = _RateLimit(4)        # charts etc. (kept under 5/sec)
+        # Dhan rate limits are per ACCOUNT, shared with the live bot on the same account. The bot's own
+        # notes: chart calls 240 ms apart met HTTP 429, 1100 ms apart never did -> stay at >= 1.1 s.
+        self._rl_data = _RateLimit(1 / 1.1)  # charts
+        self._rl_news = _RateLimit(1 / 3.0)  # news headlines (limit undocumented: stay gentle)
         self.on_data = self.on_status = None
         self.conn_keys = [set() for _ in range(self.n_conn)]
         self.key_conn = {}
@@ -138,6 +141,8 @@ class DhanProvider:
         self._loop = None
         self.conn_state = ["idle"] * self.n_conn
         self.fatal = None                    # set on auth-type disconnects -> fall back to Upstox
+        self._pc_seen = set()                # (segment, security id) that got a PREV CLOSE packet
+        self._fatal_code = self._fatal_at = None
         self._lock = threading.Lock()
 
     # ---------------- credentials ----------------
@@ -162,8 +167,81 @@ class DhanProvider:
         return c
 
     def available(self):
+        self._token_refresh_check()
         c = self.creds()
         return bool(c.get("access_token") and c.get("client_id")) and not self.fatal
+
+    _TOKEN_FATAL = (807, 808, 809)
+
+    def _token_refresh_check(self):
+        """After a token-type stop (807/808/809), a NEW dhan.json (DHAN_TOKEN.bat) resumes the feed by itself."""
+        if not self.fatal or self._creds or getattr(self, "_fatal_code", None) not in self._TOKEN_FATAL:
+            return
+        try:
+            m = os.path.getmtime(DHAN_CRED_PATH)
+        except OSError:
+            return
+        if m > (self._fatal_at or 0):
+            self.fatal, self._fatal_code = None, None
+            if self.on_status:
+                self.on_status("Dhan: new token found - reconnecting")
+
+    # ---------------- token renewal (Dhan tokens live ~24 h) ----------------
+    @staticmethod
+    def _token_from(reply):
+        """New token / expiry from a RenewToken reply (field names undocumented: accept the likely ones)."""
+        d = reply if isinstance(reply, dict) else {}
+        for _ in range(2):
+            tok = d.get("accessToken") or d.get("access_token") or d.get("token")
+            if tok:
+                return str(tok), d.get("expiryTime") or d.get("expiry") or d.get("tokenExpiry")
+            d = d.get("data") if isinstance(d.get("data"), dict) else {}
+        return None, None
+
+    def token_age_h(self, path=None):
+        path = path or DHAN_CRED_PATH
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                saved = json.load(f).get("saved_at")
+            if saved:
+                return (time.time() - float(saved)) / 3600
+            return (time.time() - os.path.getmtime(path)) / 3600
+        except Exception:
+            return None
+
+    def renew(self, path=None):
+        """GET /v2/RenewToken (DhanHQ SDK DhanLogin.renew_token). Saves the new token to dhan.json.
+        Only renews the tracker's own token; never creates a new login (that could log out a live bot).
+        Returns (ok, message) — message never contains the token."""
+        path = path or DHAN_CRED_PATH
+        c = self.creds()
+        if not c.get("access_token") or not c.get("client_id"):
+            return False, "no Dhan token"
+        try:
+            r = self._http.get(self.API + "/RenewToken", headers={"access-token": c["access_token"],
+                                                                  "dhanClientId": str(c["client_id"]),
+                                                                  "Accept": "application/json"})
+        except Exception as e:
+            return False, f"renew failed: {type(e).__name__}"
+        if r.status_code != 200:
+            return False, f"renew refused (HTTP {r.status_code})"
+        try:
+            tok, exp = self._token_from(r.json())
+        except Exception:
+            tok, exp = None, None
+        if not tok:
+            return False, "renew reply had no token (field names differ?)"
+        if self._creds:
+            self._creds = dict(self._creds, access_token=tok)
+        else:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"client_id": str(c["client_id"]), "access_token": tok, "saved_at": time.time(),
+                           "expiry": exp}, f)
+            os.replace(tmp, path)
+        if self.fatal and "expired" in str(self.fatal):
+            self.fatal = None
+        return True, f"token renewed{(' until ' + str(exp)) if exp else ''}"
 
     def auto_ok(self):
         """May trkProvider=auto pick Dhan? Only with explicit creds (dhan.json or passed in).
@@ -244,6 +322,11 @@ class DhanProvider:
                     out["NSE_EQ|" + str(sid)] = float(v["last_price"])
         return out
 
+    def news(self, body):
+        """Dhan News Headlines (Pro Traders data plan): POST /data/newsheadline, list in data.latestNews."""
+        c = self.creds()
+        return self._post("/data/newsheadline", dict(body, dhanClientId=str(c.get("client_id", ""))), self._rl_news)
+
     def option_contracts(self, stock):
         return None              # new strikes arrive via the (conditionally re-downloaded) master
 
@@ -253,11 +336,12 @@ class DhanProvider:
     def candles(self, key, interval="1", days=4):
         seg, sid = key.split("|", 1)
         inst = {"NSE_FNO": "OPTSTK", "NSE_EQ": "EQUITY"}.get(seg, "OPTSTK")
-        today = datetime.now(IST).date()
+        # Dhan intraday charts cover the last ~5 days; a wider range is refused (reported as a RATE error)
+        to = datetime.now(IST).date() + timedelta(days=1)
         body = {"securityId": sid, "exchangeSegment": seg, "instrument": inst,
                 "interval": str(interval), "oi": seg == "NSE_FNO",
-                "fromDate": (today - timedelta(days=days + 3)).strftime("%Y-%m-%d"),
-                "toDate": (today + timedelta(days=1)).strftime("%Y-%m-%d")}
+                "fromDate": (to - timedelta(days=min(days + 1, 5))).strftime("%Y-%m-%d"),
+                "toDate": to.strftime("%Y-%m-%d")}
         d = self._post("/charts/intraday", body, self._rl_data)
         d = d.get("data", d)
         ts = d.get("timestamp") or d.get("start_Time") or []
@@ -323,6 +407,8 @@ class DhanProvider:
         import websockets
         q = self._queues[i]
         while True:
+            if self.fatal:
+                self._token_refresh_check()
             if self.fatal or not self.conn_keys[i]:
                 self.conn_state[i] = "idle" if not self.fatal else "stopped"
                 await asyncio.sleep(3)
@@ -398,6 +484,7 @@ class DhanProvider:
         seg = self.SEG_NAME
         cb = self.on_data
         sizes = self._SIZE
+        pc_seen = self._pc_seen
         while off + 8 <= n:
             code = buf[off]
             size = sizes.get(code)
@@ -407,7 +494,12 @@ class DhanProvider:
                 u = self._S_FULL.unpack_from(buf, off)
                 f = {"ltp": round(u[4], 2), "ltq": u[5], "ltt": u[6], "vwap": round(u[7], 2), "volume": u[8], "tsq": u[9],
                      "tbq": u[10], "oi": u[11], "oi_hi": u[12], "oi_lo": u[13], "open": round(u[14], 2),
-                     "prev_close": round(u[15], 2), "high": round(u[16], 2), "low": round(u[17], 2)}
+                     "high": round(u[16], 2), "low": round(u[17], 2)}
+                # SDK calls this field just "close"; the PREV CLOSE packet (code 6) is the sure previous close,
+                # so FULL's value is used only until that packet has arrived for this instrument.
+                key6 = (u[2], u[3])
+                if key6 not in pc_seen and u[15] > 0:
+                    f["prev_close"] = round(u[15], 2)
                 d = self._depth(buf, off + 62)
                 if d["bid"] is None:
                     del d["bid"]
@@ -428,11 +520,15 @@ class DhanProvider:
             elif code == 6:
                 u = self._S_TICK.unpack_from(buf, off)
                 f = {"prev_close": round(u[4], 2), "prev_oi": u[5]}
+                pc_seen.add((u[2], u[3]))
             elif code == 50:
                 u = self._S_DISC.unpack_from(buf, off)
                 off += size
                 reason = self.DISCONNECT.get(u[4], f"server disconnect code {u[4]}")
-                if u[4] in (806, 807, 808, 809):
+                if u[4] in (805, 806, 807, 808, 809):
+                    self._fatal_code, self._fatal_at = u[4], time.time()
+                    # 805 = Dhan's connection limit: stop instead of reconnecting, otherwise the
+                    # tracker and a live bot on the same account keep kicking each other off.
                     self.fatal = reason
                 self._status()
                 continue

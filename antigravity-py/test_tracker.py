@@ -25,6 +25,8 @@ from trackers import providers as P
 TMP = tempfile.mkdtemp()
 T.ALERTS_PATH = os.path.join(TMP, "alerts.json")          # never touch real data
 T.TRENDS_PATH = os.path.join(TMP, "trends.json")
+T.ALERTS_DIR = os.path.join(TMP, "alerts")                  # day files (kept one expiry cycle)
+T.TRENDS_DIR = os.path.join(TMP, "trends")
 SET = dict(T.SETTINGS, trkAlwaysOn=True)
 T.setting = lambda k: SET[k]
 IST = T.IST
@@ -318,6 +320,20 @@ def test_dhan_packets():
           == (12.5, 12.0, 1000, 5000, 5100, 4900, 11.0, 10.0, 14.0, 9.0, 400, 300))
     check("PREV CLOSE packet -> prev OI", out["NSE_FNO|102"] == {"prev_close": 33.5, "prev_oi": 7000})
     check("OI + TICKER packets in the same message", out["NSE_FNO|103"] == {"oi": 4242} and out["NSE_FNO|104"]["ltp"] == 7.25)
+    d2 = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    first = d2.parse(struct.pack("<BHBIfI", 6, 16, 2, 201, 50.0, 900) + full_pkt(201))
+    later = dict(d2.parse(full_pkt(201)))
+    check("prev close: PREV CLOSE packet wins; FULL 'close' never overwrites it",
+          first[0][1]["prev_close"] == 50.0 and "prev_close" not in first[1][1] and "prev_close" not in later["NSE_FNO|201"])
+    t, p, n = make(FakeProvider("dhan", 25000))
+    t.rebalance()
+    uk = next(iter(t.ukeys))
+    t.on_data(uk, {"prev_close": 1000.0, "prev_oi": 0}, time.time())
+    t.on_data(uk, {"ltp": 1010.0, "vwap": 1005.0}, time.time())
+    check("underlying: PREV CLOSE packet (no ltp) kept -> stock change % works",
+          t.latest[uk].get("prev_close") == 1000.0 and t.latest[uk].get("ltp") == 1010.0)
+    check("prev close: FULL 'close' used only when no PREV CLOSE packet came",
+          dict(d2.parse(full_pkt(202)))["NSE_FNO|202"]["prev_close"] == 10.0)
     d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
     check("disconnect 807 -> token expired -> provider stops", d.fatal and "expired" in d.fatal and not d.available())
 
@@ -534,7 +550,7 @@ def test_trend_saved_and_alerted():
         t.on_data(k, {"ltp": v}, base + i * bar + bar - 1)
     t._drain_events()
     t._save_trends()
-    saved = json.load(open(T.TRENDS_PATH))
+    saved = [x for d in t.trend_store.days() for x in t.trend_store.load_day(d)]
     check("trend record saved to disk with start/end details",
           saved and saved[-1]["symbol"] == "STK2" and saved[-1]["status"] == "ENDED"
           and saved[-1]["started_time"] and saved[-1]["ended_time"] and saved[-1]["reason_end"])
@@ -732,6 +748,13 @@ def test_export_api():
     r = c.get("/api/tracker/export?what=alerts&fmt=xlsx")
     check("XLSX export", r.status_code == 200 and r.content[:2] == b"PK")
     check("bad export target rejected", c.get("/api/tracker/export?what=nope").status_code == 400)
+    r = c.get("/api/tracker/selfcheck").json()
+    names = {x["check"]: x["state"] for x in r["checks"]}
+    check("Recheck endpoint: every row ok/warn/fail, paper mode ok, summary counts match",
+          r["checks"] and all(x["state"] in ("ok", "warn", "fail") for x in r["checks"])
+          and names.get("Paper mode (no orders)") == "ok" and sum(r["summary"].values()) == len(r["checks"]))
+    check("Recheck endpoint: covers token, news, history, saving",
+          {"History (NSE bhavcopy)", "News: NSE", "News: Google News", "Saving history (35-day files)"} <= set(names))
 
 
 def test_board_fast_topn():
@@ -788,12 +811,163 @@ def test_auto_never_dhan_from_env_only():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
+def test_dhan_news_and_805():
+    """Dhan News Headlines: tolerant parsing, tagging by security id, wiring into NewsHub; 805 stops the feed."""
+    from trackers.news import parse_dhan_news, NewsHub
+    sid = {"2885": ("RELIANCE", "RELIANCE INDUSTRIES LTD"), "1333": ("HDFCBANK", "HDFC BANK LTD")}
+    a = {"data": {"latestNews": [
+        {"headline": "Reliance wins big order", "publishedAt": 1795785873872, "securityId": "2885", "sentiment": "POSITIVE"},
+        {"title": "HDFC Bank Q3 update", "timestamp": "2026-11-27T10:15:00+05:30", "symbols": ["HDFCBANK"]},
+        {"newsHeadline": "Reliance Industries board meet", "date": "27-11-2026 09:30:00"},   # untagged -> name match
+        {"headline": "Monsoon outlook improves"},                                             # no stock
+        {"summary": "no title -> skipped"}]}}
+    out = parse_dhan_news(a, sid)
+    by = {(i["symbol"], i["title"]) for i in out}
+    check("Dhan news: securityId tag, epoch-ms time, sentiment",
+          ("RELIANCE", "Reliance wins big order") in by
+          and next(i for i in out if i["title"] == "Reliance wins big order")["sentiment"] == "POSITIVE"
+          and next(i for i in out if i["title"] == "Reliance wins big order")["time"].startswith("2026-11-27T18:54"))
+    check("Dhan news: other field names (title/symbols/ISO, newsHeadline/date) + headline name match",
+          ("HDFCBANK", "HDFC Bank Q3 update") in by and ("RELIANCE", "Reliance Industries board meet") in by)
+    check("Dhan news: untagged market news kept without a stock, item without title skipped",
+          ("", "Monsoon outlook improves") in by and len(out) == 4)
+    check("Dhan news: plain list / data list replies also parse",
+          len(parse_dhan_news([{"headline": "x"}], sid)) == 1 and len(parse_dhan_news({"data": [{"headline": "y"}]}, sid)) == 1)
+    h = NewsHub()
+    calls = []
+    h.set_dhan(lambda body: calls.append(body) or a, lambda: sid)
+    h.poll_dhan(force=True)
+    rel = h.dhan_for("RELIANCE", fetch=False)
+    check("NewsHub: Dhan headlines stored per stock, raw reply kept",
+          len(rel) == 2 and calls[0]["categories"] == ["ALL"] and h.dhan_raw["request"]["limit"] == 50)
+    h.dhan_for("HDFCBANK", fetch=True)
+    check("NewsHub: per-stock fetch sends stockList=[security id]", calls[-1].get("stockList") == ["1333"])
+    check("NewsHub: Dhan items in the global list (only tagged ones)",
+          {i["symbol"] for i in h.latest_nse() if i["source"].startswith("Dhan")} == {"RELIANCE", "HDFCBANK"})
+    h.set_dhan(lambda body: (_ for _ in ()).throw(RuntimeError("Dhan /data/newsheadline HTTP 403")), lambda: sid)
+    h.poll_dhan(force=True)
+    check("NewsHub: Dhan error shown, never raised", "403" in h.errors.get("Dhan", ""))
+    d = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 805))
+    check("disconnect 805 (connection limit) -> feed stops, no reconnect fight with the live bot",
+          d.fatal and "5" in d.fatal and not d.available())
+
+
+def test_day_store_month():
+    """Alerts / trends / news kept per day for a whole expiry cycle (trkKeepDays), not 24 h."""
+    from trackers.store import DayStore, ist_day
+    from trackers.news import NewsHub
+    d = DayStore(os.path.join(TMP, "ds"), keep_days=35)
+    now = time.time()
+    for back in (0, 1, 20, 34, 40):
+        ts = now - back * 86400
+        d.merge_day(ist_day(ts), [{"id": f"a{back}", "ts": ts}])
+    d.merge_day(ist_day(now), [{"id": "a0", "ts": now, "v": 2}, {"id": "b0", "ts": now}])
+    check("day files: merge de-duplicates by id (newer copy wins)",
+          len(d.load_day(ist_day(now))) == 2 and next(x for x in d.load_day(ist_day(now)) if x["id"] == "a0").get("v") == 2)
+    d.prune(now)
+    check("day files: 34-day-old kept, 40-day-old pruned (35-day keep)",
+          ist_day(now - 34 * 86400) in d.days() and ist_day(now - 40 * 86400) not in d.days())
+    check("day files: load_since spans days", {x["id"] for x in d.load_since(now - 21 * 86400)} == {"a0", "b0", "a1", "a20"})
+    t, p, n = make()
+    t.alerts.clear()
+    old = {"id": 1, "symbol": "STK1", "time": ist_day(now - 3 * 86400) + " 10:00:00", "ts": now - 3 * 86400, "status": "UNEXPLAINED", "legs": []}
+    t.alert_store.save_day(ist_day(old["ts"]), [old])
+    check("old day's alerts readable by date + listed in days",
+          t.alerts_for_day(ist_day(old["ts"]))[0]["id"] == 1 and ist_day(old["ts"]) in t.history_days())
+    h = NewsHub(store_dir=os.path.join(TMP, "news"), keep_days=35)
+    it = {"source": "NSE", "symbol": "STK1", "id": "nse:old", "time": "", "ts": now - 10 * 86400, "title": "old filing", "summary": "", "url": ""}
+    h.store.merge_day(ist_day(it["ts"]), [it])
+    h._store_nse([{**it, "id": "nse:new", "ts": now - 60, "title": "new filing"}])
+    h.persist(force=True)
+    check("news: 10-day-old item served for a 30-day window, not for 24 h",
+          {x["id"] for x in h.latest_nse(since_ts=now - 30 * 86400)} == {"nse:old", "nse:new"}
+          and {x["id"] for x in h.latest_nse(since_ts=now - 86400)} == {"nse:new"})
+    check("news: today's items persisted to the day file", any(x["id"] == "nse:new" for x in h.store.load_day(ist_day(now))))
+
+
+def test_dhan_token_renew():
+    """Dhan tokens live ~24 h: RenewToken (SDK DhanLogin.renew_token) keeps the tracker's own token alive."""
+    import httpx
+    path = os.path.join(TMP, "dhan_renew.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"client_id": "1100", "access_token": "old-token", "saved_at": time.time() - 21 * 3600}, f)
+    seen = {}
+
+    def handler(req):
+        seen.update(url=str(req.url), tok=req.headers.get("access-token"), cid=req.headers.get("dhanClientId"))
+        return httpx.Response(200, json={"data": {"accessToken": "new-token", "expiryTime": "2026-11-28T07:30:00"}})
+    old = P.DHAN_CRED_PATH
+    P.DHAN_CRED_PATH = path
+    try:
+        d = P.DhanProvider(1)
+        d._http = httpx.Client(transport=httpx.MockTransport(handler))
+        check("token age read from dhan.json (21 h)", 20.9 < d.token_age_h(path) < 21.1)
+        ok, msg = d.renew(path)
+        saved = json.load(open(path))
+        check("RenewToken: GET /v2/RenewToken with access-token + dhanClientId headers",
+              seen["url"].endswith("/v2/RenewToken") and seen["tok"] == "old-token" and seen["cid"] == "1100")
+        check("renewed token saved (client id kept, age reset), message has no token",
+              ok and saved["access_token"] == "new-token" and saved["client_id"] == "1100"
+              and d.token_age_h(path) < 0.01 and "new-token" not in msg)
+        d._http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"errorCode": "DH-901"})))
+        ok2, msg2 = d.renew(path)
+        check("renew refused -> old token kept, clear message", not ok2 and "401" in msg2
+              and json.load(open(path))["access_token"] == "new-token")
+        t, p, n = make()
+        t.providers["dhan"] = d
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "x", "saved_at": time.time() - 22 * 3600}, f)
+        t._maybe_renew()
+        check("tracker: renew attempted when token > 20 h, failure shown as an error",
+              "token" in t.stats["errors"] and "DHAN_TOKEN" in t.stats["errors"]["token"])
+    finally:
+        P.DHAN_CRED_PATH = old
+
+
+def test_dhan_rate_and_chart_window():
+    """Dhan limits are per account (shared with the live bot): gentle chart/news pacing, <= 5-day chart range."""
+    import httpx
+    from datetime import date
+    seen = []
+    d = P.DhanProvider(1, creds={"client_id": "1", "access_token": "x"})
+    d._http = httpx.Client(transport=httpx.MockTransport(lambda r: seen.append(json.loads(r.content)) or httpx.Response(
+        200, json={"open": [1], "high": [2], "low": [0.5], "close": [1.5], "volume": [10], "timestamp": [1795700000]})))
+    d.candles("NSE_FNO|5001", "1")
+    b = seen[0]
+    span = (date.fromisoformat(b["toDate"]) - date.fromisoformat(b["fromDate"])).days
+    check("chart request spans <= 5 days (Dhan refuses wider intraday ranges)", 1 <= span <= 5, f"({span} days)")
+    check("chart/news pacing: >= 1.1 s between chart calls, >= 3 s between news calls",
+          d._rl_data.gap >= 1.1 - 1e-9 and d._rl_news.gap >= 3.0 - 1e-9)
+
+
+def test_token_replaced_resumes_feed():
+    """Token expired (807) stops the feed; a NEW dhan.json (DHAN_TOKEN.bat or auto-renew) resumes it without a restart."""
+    old = P.DHAN_CRED_PATH
+    P.DHAN_CRED_PATH = os.path.join(TMP, "dhan_resume.json")
+    try:
+        with open(P.DHAN_CRED_PATH, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "old"}, f)
+        os.utime(P.DHAN_CRED_PATH, (time.time() - 60, time.time() - 60))
+        d = P.DhanProvider(1)
+        d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
+        check("807 -> stopped while the token file is unchanged", d.fatal and not d.available())
+        with open(P.DHAN_CRED_PATH, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "new"}, f)
+        check("new dhan.json -> feed resumes by itself", d.available() and d.fatal is None)
+        d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 805))
+        os.utime(P.DHAN_CRED_PATH, None)
+        check("805 (connection limit) is NOT auto-resumed by a token change", d.fatal and not d.available())
+    finally:
+        P.DHAN_CRED_PATH = old
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_dhan_rate_and_chart_window, test_token_replaced_resumes_feed, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")
