@@ -166,6 +166,63 @@ class DhanProvider:
         c = self.creds()
         return bool(c.get("access_token") and c.get("client_id")) and not self.fatal
 
+    # ---------------- token renewal (Dhan tokens live ~24 h) ----------------
+    @staticmethod
+    def _token_from(reply):
+        """New token / expiry from a RenewToken reply (field names undocumented: accept the likely ones)."""
+        d = reply if isinstance(reply, dict) else {}
+        for _ in range(2):
+            tok = d.get("accessToken") or d.get("access_token") or d.get("token")
+            if tok:
+                return str(tok), d.get("expiryTime") or d.get("expiry") or d.get("tokenExpiry")
+            d = d.get("data") if isinstance(d.get("data"), dict) else {}
+        return None, None
+
+    def token_age_h(self, path=None):
+        path = path or DHAN_CRED_PATH
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                saved = json.load(f).get("saved_at")
+            if saved:
+                return (time.time() - float(saved)) / 3600
+            return (time.time() - os.path.getmtime(path)) / 3600
+        except Exception:
+            return None
+
+    def renew(self, path=None):
+        """GET /v2/RenewToken (DhanHQ SDK DhanLogin.renew_token). Saves the new token to dhan.json.
+        Only renews the tracker's own token; never creates a new login (that could log out a live bot).
+        Returns (ok, message) — message never contains the token."""
+        path = path or DHAN_CRED_PATH
+        c = self.creds()
+        if not c.get("access_token") or not c.get("client_id"):
+            return False, "no Dhan token"
+        try:
+            r = self._http.get(self.API + "/RenewToken", headers={"access-token": c["access_token"],
+                                                                  "dhanClientId": str(c["client_id"]),
+                                                                  "Accept": "application/json"})
+        except Exception as e:
+            return False, f"renew failed: {type(e).__name__}"
+        if r.status_code != 200:
+            return False, f"renew refused (HTTP {r.status_code})"
+        try:
+            tok, exp = self._token_from(r.json())
+        except Exception:
+            tok, exp = None, None
+        if not tok:
+            return False, "renew reply had no token (field names differ?)"
+        if self._creds:
+            self._creds = dict(self._creds, access_token=tok)
+        else:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"client_id": str(c["client_id"]), "access_token": tok, "saved_at": time.time(),
+                           "expiry": exp}, f)
+            os.replace(tmp, path)
+        if self.fatal and "expired" in str(self.fatal):
+            self.fatal = None
+        return True, f"token renewed{(' until ' + str(exp)) if exp else ''}"
+
     def auto_ok(self):
         """May trkProvider=auto pick Dhan? Only with explicit creds (dhan.json or passed in).
         DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN env vars alone are NOT enough: a live bot on the same

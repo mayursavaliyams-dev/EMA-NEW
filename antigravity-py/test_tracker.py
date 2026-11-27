@@ -865,12 +865,51 @@ def test_day_store_month():
     check("news: today's items persisted to the day file", any(x["id"] == "nse:new" for x in h.store.load_day(ist_day(now))))
 
 
+def test_dhan_token_renew():
+    """Dhan tokens live ~24 h: RenewToken (SDK DhanLogin.renew_token) keeps the tracker's own token alive."""
+    import httpx
+    path = os.path.join(TMP, "dhan_renew.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"client_id": "1100", "access_token": "old-token", "saved_at": time.time() - 21 * 3600}, f)
+    seen = {}
+
+    def handler(req):
+        seen.update(url=str(req.url), tok=req.headers.get("access-token"), cid=req.headers.get("dhanClientId"))
+        return httpx.Response(200, json={"data": {"accessToken": "new-token", "expiryTime": "2026-11-28T07:30:00"}})
+    old = P.DHAN_CRED_PATH
+    P.DHAN_CRED_PATH = path
+    try:
+        d = P.DhanProvider(1)
+        d._http = httpx.Client(transport=httpx.MockTransport(handler))
+        check("token age read from dhan.json (21 h)", 20.9 < d.token_age_h(path) < 21.1)
+        ok, msg = d.renew(path)
+        saved = json.load(open(path))
+        check("RenewToken: GET /v2/RenewToken with access-token + dhanClientId headers",
+              seen["url"].endswith("/v2/RenewToken") and seen["tok"] == "old-token" and seen["cid"] == "1100")
+        check("renewed token saved (client id kept, age reset), message has no token",
+              ok and saved["access_token"] == "new-token" and saved["client_id"] == "1100"
+              and d.token_age_h(path) < 0.01 and "new-token" not in msg)
+        d._http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"errorCode": "DH-901"})))
+        ok2, msg2 = d.renew(path)
+        check("renew refused -> old token kept, clear message", not ok2 and "401" in msg2
+              and json.load(open(path))["access_token"] == "new-token")
+        t, p, n = make()
+        t.providers["dhan"] = d
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "x", "saved_at": time.time() - 22 * 3600}, f)
+        t._maybe_renew()
+        check("tracker: renew attempted when token > 20 h, failure shown as an error",
+              "token" in t.stats["errors"] and "DHAN_TOKEN" in t.stats["errors"]["token"])
+    finally:
+        P.DHAN_CRED_PATH = old
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

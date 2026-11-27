@@ -791,7 +791,7 @@ async function renderTracker(){
   const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
     ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
-    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks +${st.futures_live||0} futures · `+esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
+    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks +${st.futures_live||0} futures · `+esc(st.feed)+(st.token?' · 🔑 '+esc(st.token):'')+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
     ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
     ['Trends', `${st.trends_running||0} running`, `${st.trends_today||0} today · IV/greeks on ${nf(st.greeks)} strikes`],
     ['Alerts today', st.alerts_today, `re-centred ${st.last_rebalance||'--'} · new strikes ${st.new_strikes_today}`],

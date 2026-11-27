@@ -49,6 +49,9 @@ if not exist "dhan.json" (
   if errorlevel 1 ( pause & exit /b 1 )
 )
 
+rem --- keep the Dhan token alive (renews it when ~20 h old; never logs in afresh) ---
+".venv\Scripts\python.exe" dhan_setup.py --renew
+
 rem --- safety settings: paper only, Dhan only, 5 connections ---
 rem "TRACKER_START.bat now" = test right now even when the market is closed
 set "ALWAYS=False"

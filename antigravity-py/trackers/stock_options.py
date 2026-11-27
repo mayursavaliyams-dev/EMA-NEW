@@ -568,9 +568,30 @@ class StockOptionsTracker:
                 self.stats["errors"]["main"] = f"{type(e).__name__}: {e}"[:200]
             self._stop.wait(1)
 
+    def _maybe_renew(self, now=None):
+        """Keep the Dhan token alive: renew when it is ~20 h old (it expires at ~24 h). Retries hourly."""
+        now = now or time.time()
+        d = self.providers.get("dhan")
+        if not d or not hasattr(d, "renew") or now - getattr(self, "_t_renew", 0) < 3600:
+            return
+        age = d.token_age_h()
+        if age is None or age < 20:
+            return
+        self._t_renew = now
+        try:
+            ok, msg = d.renew()
+        except Exception as e:
+            ok, msg = False, f"renew error {type(e).__name__}"
+        self.stats["token"] = f"{datetime.now(IST):%d-%b %H:%M} {msg}"
+        if not ok:
+            self.stats["errors"]["token"] = msg + " — run DHAN_TOKEN.bat"
+        else:
+            self.stats["errors"].pop("token", None)
+
     def _slow_loop(self):
         """History (NSE bhavcopy) + NSE context — slow downloads, kept off the main loop."""
         while not self._stop.is_set():
+            self._maybe_renew()
             now = time.time()
             try:
                 if self.hist is not False and (now - self._t_hist > 1800 or not self.hist.dates):

@@ -7,6 +7,7 @@ answer and writes dhan.json next to this file. Never prints the token.
 import json
 import os
 import sys
+import time
 
 import httpx
 
@@ -33,7 +34,26 @@ def check(token, http=None):
 
 def save(token, client_id, path=PATH):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"client_id": client_id, "access_token": token}, f)
+        json.dump({"client_id": client_id, "access_token": token, "saved_at": time.time()}, f)
+
+
+def renew_quiet():
+    """TRACKER_START: renew the saved token if it is older than 20 h. Never asks anything."""
+    if not os.path.exists(PATH):
+        return 0
+    sys.path.insert(0, HERE)
+    from trackers.providers import DhanProvider
+    d = DhanProvider(1)
+    age = d.token_age_h(PATH)
+    if age is not None and age < 20:
+        print(f"  Dhan token OK ({age:.0f} kalak juno).")
+        return 0
+    ok, msg = d.renew(PATH)
+    if ok:
+        print("  [OK] Dhan token potani rite renew thayo.")
+        return 0
+    print(f"  [!] Dhan token renew na thayo ({msg}). DHAN_TOKEN.bat chalavi navo token nakho.")
+    return 2
 
 
 def main():
@@ -55,4 +75,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(renew_quiet() if "--renew" in sys.argv else main())
