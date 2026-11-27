@@ -1269,6 +1269,11 @@ class StockOptionsTracker:
             st = self.trend.running(self.u.stocks.get(a["symbol"], {}).get("underlying_key"))
             a["stock_trend"] = {"dir": st["dir"], "since": st["started_time"], "move_pct": st["move_pct"]} if st else None
             a.update(self.ctx.info(a["symbol"]) if self.ctx else {})
+            uk = self.u.stocks.get(a["symbol"], {}).get("underlying_key")
+            ul = self.latest.get(uk, {})
+            sp, pcl = self.spots.get(uk), ul.get("prev_close")
+            a["spot"] = round(sp, 2) if sp else a["spot"]
+            a["chg_pct"] = round((sp - pcl) / pcl * 100, 2) if sp and pcl else None
             fr = self.fut_row(a["symbol"])
             if fr:
                 a.update({"fut_ltp": fr["ltp"], "fut_basis_pct": fr["basis_pct"], "fut_oi_chg_pct": fr["oi_chg_pct"],

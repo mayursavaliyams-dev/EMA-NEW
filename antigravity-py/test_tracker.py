@@ -636,6 +636,9 @@ def test_futures():
     s9 = [x for x in t.summary() if x["symbol"] == "STK9"][0]
     check("summary carries futures basis / buildup / rollover", s9["fut_buildup"] == "LB" and s9["rollover_pct"] == 21.4)
     check("futures list endpoint data", any(x["symbol"] == "STK9" for x in t.futures()))
+    t.on_data(uk, {"ltp": 1010.0, "prev_close": 1000.0}, now + 3)
+    s9 = [x for x in t.summary() if x["symbol"] == "STK9"][0]
+    check("stock day change % for the UP/DOWN filter", s9["chg_pct"] == 1.0 and s9["spot"] == 1010.0)
 
 
 if __name__ == "__main__":
