@@ -320,6 +320,13 @@ def test_dhan_packets():
           == (12.5, 12.0, 1000, 5000, 5100, 4900, 11.0, 10.0, 14.0, 9.0, 400, 300))
     check("PREV CLOSE packet -> prev OI", out["NSE_FNO|102"] == {"prev_close": 33.5, "prev_oi": 7000})
     check("OI + TICKER packets in the same message", out["NSE_FNO|103"] == {"oi": 4242} and out["NSE_FNO|104"]["ltp"] == 7.25)
+    d2 = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    first = d2.parse(struct.pack("<BHBIfI", 6, 16, 2, 201, 50.0, 900) + full_pkt(201))
+    later = dict(d2.parse(full_pkt(201)))
+    check("prev close: PREV CLOSE packet wins; FULL 'close' never overwrites it",
+          first[0][1]["prev_close"] == 50.0 and "prev_close" not in first[1][1] and "prev_close" not in later["NSE_FNO|201"])
+    check("prev close: FULL 'close' used only when no PREV CLOSE packet came",
+          dict(d2.parse(full_pkt(202)))["NSE_FNO|202"]["prev_close"] == 10.0)
     d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
     check("disconnect 807 -> token expired -> provider stops", d.fatal and "expired" in d.fatal and not d.available())
 
@@ -911,12 +918,28 @@ def test_dhan_token_renew():
         P.DHAN_CRED_PATH = old
 
 
+def test_dhan_rate_and_chart_window():
+    """Dhan limits are per account (shared with the live bot): gentle chart/news pacing, <= 5-day chart range."""
+    import httpx
+    from datetime import date
+    seen = []
+    d = P.DhanProvider(1, creds={"client_id": "1", "access_token": "x"})
+    d._http = httpx.Client(transport=httpx.MockTransport(lambda r: seen.append(json.loads(r.content)) or httpx.Response(
+        200, json={"open": [1], "high": [2], "low": [0.5], "close": [1.5], "volume": [10], "timestamp": [1795700000]})))
+    d.candles("NSE_FNO|5001", "1")
+    b = seen[0]
+    span = (date.fromisoformat(b["toDate"]) - date.fromisoformat(b["fromDate"])).days
+    check("chart request spans <= 5 days (Dhan refuses wider intraday ranges)", 1 <= span <= 5, f"({span} days)")
+    check("chart/news pacing: >= 1.1 s between chart calls, >= 3 s between news calls",
+          d._rl_data.gap >= 1.1 - 1e-9 and d._rl_news.gap >= 3.0 - 1e-9)
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_dhan_rate_and_chart_window, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

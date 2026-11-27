@@ -130,8 +130,10 @@ class DhanProvider:
             self.API = api
         self._http = httpx.Client(timeout=20)
         self._rl_quote = _RateLimit(1)       # Dhan: market-quote APIs 1 req/sec
-        self._rl_data = _RateLimit(4)        # charts etc. (kept under 5/sec)
-        self._rl_news = _RateLimit(1)        # news headlines (limit undocumented: stay gentle)
+        # Dhan rate limits are per ACCOUNT, shared with the live bot on the same account. The bot's own
+        # notes: chart calls 240 ms apart met HTTP 429, 1100 ms apart never did -> stay at >= 1.1 s.
+        self._rl_data = _RateLimit(1 / 1.1)  # charts
+        self._rl_news = _RateLimit(1 / 3.0)  # news headlines (limit undocumented: stay gentle)
         self.on_data = self.on_status = None
         self.conn_keys = [set() for _ in range(self.n_conn)]
         self.key_conn = {}
@@ -139,6 +141,7 @@ class DhanProvider:
         self._loop = None
         self.conn_state = ["idle"] * self.n_conn
         self.fatal = None                    # set on auth-type disconnects -> fall back to Upstox
+        self._pc_seen = set()                # (segment, security id) that got a PREV CLOSE packet
         self._lock = threading.Lock()
 
     # ---------------- credentials ----------------
@@ -316,11 +319,12 @@ class DhanProvider:
     def candles(self, key, interval="1", days=4):
         seg, sid = key.split("|", 1)
         inst = {"NSE_FNO": "OPTSTK", "NSE_EQ": "EQUITY"}.get(seg, "OPTSTK")
-        today = datetime.now(IST).date()
+        # Dhan intraday charts cover the last ~5 days; a wider range is refused (reported as a RATE error)
+        to = datetime.now(IST).date() + timedelta(days=1)
         body = {"securityId": sid, "exchangeSegment": seg, "instrument": inst,
                 "interval": str(interval), "oi": seg == "NSE_FNO",
-                "fromDate": (today - timedelta(days=days + 3)).strftime("%Y-%m-%d"),
-                "toDate": (today + timedelta(days=1)).strftime("%Y-%m-%d")}
+                "fromDate": (to - timedelta(days=min(days + 1, 5))).strftime("%Y-%m-%d"),
+                "toDate": to.strftime("%Y-%m-%d")}
         d = self._post("/charts/intraday", body, self._rl_data)
         d = d.get("data", d)
         ts = d.get("timestamp") or d.get("start_Time") or []
@@ -461,6 +465,7 @@ class DhanProvider:
         seg = self.SEG_NAME
         cb = self.on_data
         sizes = self._SIZE
+        pc_seen = self._pc_seen
         while off + 8 <= n:
             code = buf[off]
             size = sizes.get(code)
@@ -470,7 +475,12 @@ class DhanProvider:
                 u = self._S_FULL.unpack_from(buf, off)
                 f = {"ltp": round(u[4], 2), "ltq": u[5], "ltt": u[6], "vwap": round(u[7], 2), "volume": u[8], "tsq": u[9],
                      "tbq": u[10], "oi": u[11], "oi_hi": u[12], "oi_lo": u[13], "open": round(u[14], 2),
-                     "prev_close": round(u[15], 2), "high": round(u[16], 2), "low": round(u[17], 2)}
+                     "high": round(u[16], 2), "low": round(u[17], 2)}
+                # SDK calls this field just "close"; the PREV CLOSE packet (code 6) is the sure previous close,
+                # so FULL's value is used only until that packet has arrived for this instrument.
+                key6 = (u[2], u[3])
+                if key6 not in pc_seen and u[15] > 0:
+                    f["prev_close"] = round(u[15], 2)
                 d = self._depth(buf, off + 62)
                 if d["bid"] is None:
                     del d["bid"]
@@ -491,6 +501,7 @@ class DhanProvider:
             elif code == 6:
                 u = self._S_TICK.unpack_from(buf, off)
                 f = {"prev_close": round(u[4], 2), "prev_oi": u[5]}
+                pc_seen.add((u[2], u[3]))
             elif code == 50:
                 u = self._S_DISC.unpack_from(buf, off)
                 off += size

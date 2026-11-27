@@ -7,7 +7,7 @@ Upstox (the broker) has no public news API, so news comes from two free, key-les
      - global latest list polled every ~60 s  + per-symbol fetch when a stock spikes.
   2. Google News RSS               (media coverage) — fetched per stock, on demand.
   3. Dhan News Headlines API       (POST /v2/data/newsheadline, Dhan "Pro Traders" data plan)
-     - only when the tracker runs on Dhan; latest 50 polled every 2 min + per stock on demand.
+     - only when the tracker runs on Dhan; latest 50 polled every minute + per stock (<= every 15 min).
      - Dhan's response item fields are not publicly documented (SDK 2.4.0rc1 only says the list
        is under data.latestNews), so parse_dhan_news() accepts several likely field names and
        the raw reply is kept (dhan_raw) for /api/tracker/news/dhan-raw to check the real names.
@@ -203,7 +203,7 @@ class NewsHub:
         self._dhan_items = {}         # id -> item
         self._dhan_last = 0.0
         self._sym_dhan_last = {}
-        self.dhan_ttl = 120
+        self.dhan_ttl = 60
         self.dhan_raw = None          # last raw reply (to check Dhan's real field names)
         self.dhan_polls = 0
         # every headline is also saved per day (store_dir) for a whole expiry cycle (keep_days)
@@ -340,7 +340,9 @@ class NewsHub:
 
     def dhan_for(self, symbol, fetch=True):
         symbol = symbol.upper()
-        if fetch and self._dhan_post and time.time() - self._sym_dhan_last.get(symbol, 0) > 300:
+        # per-stock lookups at most every 15 min per stock (the latest-50 poll every minute covers the rest):
+        # worst case 218 stocks / 15 min ~ 0.25 calls/s, under the 1-per-3-s news pacing
+        if fetch and self._dhan_post and time.time() - self._sym_dhan_last.get(symbol, 0) > 900:
             self._sym_dhan_last[symbol] = time.time()
             sid = next((k for k, v in (self._dhan_sids() or {}).items() if v[0] == symbol), None)
             if sid:
