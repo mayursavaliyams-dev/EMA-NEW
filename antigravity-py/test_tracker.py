@@ -734,6 +734,13 @@ def test_export_api():
     r = c.get("/api/tracker/export?what=alerts&fmt=xlsx")
     check("XLSX export", r.status_code == 200 and r.content[:2] == b"PK")
     check("bad export target rejected", c.get("/api/tracker/export?what=nope").status_code == 400)
+    r = c.get("/api/tracker/selfcheck").json()
+    names = {x["check"]: x["state"] for x in r["checks"]}
+    check("Recheck endpoint: every row ok/warn/fail, paper mode ok, summary counts match",
+          r["checks"] and all(x["state"] in ("ok", "warn", "fail") for x in r["checks"])
+          and names.get("Paper mode (no orders)") == "ok" and sum(r["summary"].values()) == len(r["checks"]))
+    check("Recheck endpoint: covers token, news, history, saving",
+          {"History (NSE bhavcopy)", "News: NSE", "News: Google News", "Saving history (35-day files)"} <= set(names))
 
 
 def test_board_fast_topn():

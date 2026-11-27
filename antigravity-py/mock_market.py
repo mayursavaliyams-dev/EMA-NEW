@@ -348,9 +348,9 @@ def build_app():
     d.MASTER_PATH = os.path.join(config.DATA, "dhan_master_mock.csv")
     if os.path.exists(d.MASTER_PATH):
         os.remove(d.MASTER_PATH)
-    # history / NSE context / NSE extras are real-market data: off here, it would not match mock prices
-    main.tracker = StockOptionsTracker(main.conn, main.news_hub, providers={"dhan": d},
-                                       history=False, context=False, extra=False)
+        # history / NSE context / NSE extras are REAL NSE data (bhavcopy, ban list, FII/DII, deals): they fill
+    # the multi-day / FII / deals tables; their prices won't match the mock prices.
+    main.tracker = StockOptionsTracker(main.conn, main.news_hub, providers={"dhan": d})
     main.engine.try_enter = lambda *a, **k: None          # belt and braces: the mock never trades
     return main.app
 

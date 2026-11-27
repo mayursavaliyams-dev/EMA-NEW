@@ -186,7 +186,9 @@
   <div style="display:flex;align-items:center;gap:8px;padding:0 14px 8px;flex-wrap:wrap"><span class="hl-badge">Show rows:</span><span class="flt" id="trk-ud"></span>
     <span class="hl-badge">applies to alerts, trends, top strikes, all-stocks and multi-day tables</span>
     <span style="margin-left:auto;display:flex;gap:4px;align-items:center;flex-wrap:wrap"><span class="hl-badge">⬇ Excel:</span><span class="flt" id="trk-exp-btns"></span>
-      <button class="tg" onclick="trkTgTest()" title="send a test message to your Telegram">📱 Telegram test</button></span></div>
+      <button class="tg" onclick="trkTgTest()" title="send a test message to your Telegram">📱 Telegram test</button>
+      <button class="tg" style="border-color:var(--warn);color:var(--warn)" onclick="trkRecheck()" title="check everything now: Dhan feed, token, news, history, saving, and every table filter">🔍 Recheck</button></span></div>
+  <div class="panel" id="trk-check" style="margin:0 12px 8px;display:none"><div class="ph"><span id="trk-check-t">🔍 Recheck</span><button class="tg" onclick="$('trk-check').style.display='none'">✕</button></div><div id="trk-check-b" style="padding:6px 10px;font-size:12px"></div></div>
   <div class="trk-grid" style="grid-template-columns:1fr 1fr">
     <div class="panel">
       <div class="ph"><span>🌍 FII / DII / Pro / Client positions (NSE participant OI)</span><span class="hl-badge" id="trk-part-date"></span></div>
@@ -897,6 +899,9 @@ const tfSave=()=>{ try{ localStorage.setItem('trkTF',JSON.stringify(TF)); }catch
 const TF_DEF={ud:'',q:'',opt:'',bu:'',kind:'',fc:'',fmin:'',fmax:'',sc:null,desc:true,lim:0,hide:[],atm:0,dc:null};
 const tfS=id=>{ const o=TF[id]||(TF[id]={}); for(const k in TF_DEF) if(!(k in o)) o[k]=Array.isArray(TF_DEF[k])?[]:TF_DEF[k]; return o; };
 const tfNum=t=>{ const m=String(t).replace(/,/g,'').match(/[-+]?\d*\.?\d+/); return m?parseFloat(m[0]):null; };
+function tfCellSign(c){ if(!c) return null;           // coloured change span (pc/sg/streak) wins over the plain number
+  const sp=c.querySelector('.up,.down'); if(sp) return sp.classList.contains('up')?(tfNum(sp.textContent)===0?null:1):-1;
+  return tfSign(c.textContent); }
 function tfSign(t){ t=String(t).trim(); if(!t||t==='--') return null;
   if(/▲|↗|\bBUY\b|\bUP\b|POSITIVE/i.test(t)) return 1; if(/▼|↘|\bSELL\b|\bDOWN\b|NEGATIVE/i.test(t)) return -1;
   const n=tfNum(t); return n==null||n===0?null:(n>0?1:-1); }
@@ -982,7 +987,7 @@ function tfApply(id, keepBar){
     }
     const dc=st.dc??cfg.dir, atmI=cfg.atm&&st.atm?rows.findIndex(r=>r.classList.contains('atm')):-1;
     rows.forEach((r,ri)=>{ if(r.cells.length<2){ r.style.display=''; return; } total++;
-      const sgn=dc!=null&&r.cells[dc]?tfSign(r.cells[dc].textContent):null;
+      const sgn=dc!=null&&r.cells[dc]?tfCellSign(r.cells[dc]):null;
       let ok=(!st.ud||(st.ud==='UP'?sgn===1:sgn===-1))
         &&(!toks.length||toks.some(t=>r.textContent.toUpperCase().includes(t)))
         &&(!st.opt||cfg.opt==null||(r.cells[cfg.opt]&&r.cells[cfg.opt].textContent.toUpperCase().includes(st.opt)))
@@ -999,6 +1004,44 @@ function tfApply(id, keepBar){
 // re-apply after every refresh (tables are rebuilt every few seconds)
 Object.keys(TF_CFG).forEach(id=>{ const el=$(id); if(!el) return;
   new MutationObserver(()=>tfApply(id)).observe(el,{childList:true}); tfApply(id); });
+
+// ---- 🔍 Recheck: server checks + every table filter tested on the rows on screen ----
+function tfSelfTest(){
+  const res=[];
+  for(const id of Object.keys(TF_CFG)){
+    const el=$(id); if(!el) continue;
+    const st=tfS(id), keep=JSON.stringify(st);
+    const rowsOf=()=>TF_CFG[id].items?[...el.children].filter(c=>c.dataset.dir!==undefined):(el.tBodies[0]?[...el.tBodies[0].rows].filter(r=>r.cells.length>1):[]);
+    const sgn=r=>TF_CFG[id].items?(r.dataset.dir===''?null:+r.dataset.dir):tfCellSign(r.cells[st.dc??TF_CFG[id].dir]);
+    const all=rowsOf();
+    if(!all.length){ res.push([id,'warn','no rows right now (nothing to test)']); continue; }
+    Object.assign(st,{q:'',opt:'',bu:'',kind:'',fc:'',fmin:'',fmax:'',lim:0,atm:0});
+    let bad=[];
+    const exp={UP:all.filter(r=>sgn(r)===1).length, DOWN:all.filter(r=>sgn(r)===-1).length};
+    for(const side of ['UP','DOWN']){
+      st.ud=side; tfApply(id,true);
+      const vis=rowsOf().filter(r=>r.style.display!=='none'); const want=side==='UP'?1:-1;
+      if(vis.some(r=>sgn(r)!==want)) bad.push(`${side} shows a wrong row`);
+      if(vis.length!==exp[side]) bad.push(`${side} shows ${vis.length}, expected ${exp[side]}`);
+    }
+    st.ud=''; tfApply(id,true);
+    if(rowsOf().some(r=>r.style.display==='none')) bad.push('All hides rows');
+    for(const k of Object.keys(st)) delete st[k]; Object.assign(st,JSON.parse(keep)); tfApply(id);
+    res.push([id, bad.length?'fail':'ok', bad.length?bad.join('; '):`UP ${exp.UP} · DOWN ${exp.DOWN} · All ${all.length} rows — correct`]);
+  }
+  return res;
+}
+const TF_NAME={'trk-part':'FII/DII table','trk-deals':'Bulk/Block deals','trk-sec':'Sector heatmap','trk-alerts':'Alerts','trk-movers':'Top strikes','trk-trends':'Trends','trk-hist':'Multi-day OI','trk-sum':'All F&O stocks','trk-ladder':'Strike ladder','trk-sdays':'Day-by-day','trk-sbuild':'Strike OI build','trk-news':'News list'};
+async function trkRecheck(){
+  $('trk-check').style.display=''; $('trk-check-t').textContent='🔍 Recheck — running…'; $('trk-check-b').innerHTML='';
+  const ic={ok:'✅',warn:'⚠️',fail:'❌'};
+  let srv; try{ srv=await j('/api/tracker/selfcheck'); }catch(e){ srv={checks:[{check:'Server',state:'fail',detail:String(e)}],summary:{}}; }
+  const ui=tfSelfTest().map(([id,s,d])=>({check:'Filter UP/DOWN: '+(TF_NAME[id]||id),state:s,detail:d}));
+  const rows=[...(srv.checks||[]),...ui];
+  const n={ok:0,warn:0,fail:0}; rows.forEach(r=>n[r.state]++);
+  $('trk-check-t').innerHTML=`🔍 Recheck ${esc(srv.time||'')} — ✅ ${n.ok} · ⚠️ ${n.warn} · ❌ ${n.fail}`;
+  $('trk-check-b').innerHTML='<table><tbody>'+rows.map(r=>`<tr><td>${ic[r.state]||''}</td><td><b>${esc(r.check)}</b></td><td style="white-space:normal">${esc(typeof r.detail==='string'?r.detail:JSON.stringify(r.detail))}</td></tr>`).join('')+'</tbody></table>';
+}
 
 renderTF(); renderOptTF(); renderST(); loadIndexChart(); loadAll();
 let TRK_BUSY=false, TICK_N=0;

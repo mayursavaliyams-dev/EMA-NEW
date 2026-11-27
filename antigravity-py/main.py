@@ -413,6 +413,77 @@ def tracker_news_dhan_raw():
             "raw_sample": items[:3], "request": raw.get("request"), "at": raw.get("at")}
 
 
+@app.get("/api/tracker/selfcheck")
+def tracker_selfcheck():
+    """One-click recheck of everything the tracker depends on. Each row: ok | warn | fail + plain reason."""
+    import time as _t
+    out = []
+
+    def add(name, state, detail=""):
+        out.append({"check": name, "state": state, "detail": str(detail)[:240]})
+    st = tracker.status()
+    active = st.get("active")
+    add("Paper mode (no orders)", "ok" if config.cfg("TRADE_MODE") == "paper" else "fail", config.cfg("TRADE_MODE"))
+    add("Tracker on", "ok" if st.get("enabled") else "fail")
+    want = str(config.cfg("trkProvider") or "auto")
+    add("Data source = Dhan", "ok" if want == "dhan" else "warn", f"setting trkProvider={want}, using {st.get('provider') or '--'}")
+    d = tracker.providers.get("dhan")
+    if d is not None:
+        age = d.token_age_h() if hasattr(d, "token_age_h") else None
+        add("Dhan token present", "ok" if d.available() else "fail",
+            "token loaded" if d.available() else (st.get("dhan_error") or "no token: run DHAN_TOKEN.bat"))
+        if age is not None:
+            add("Dhan token age", "ok" if age < 20 else "warn" if age < 24 else "fail",
+                f"{age:.1f} h old (renewed automatically at ~20 h; expires ~24 h)")
+        add("Dhan feed error", "fail" if st.get("dhan_error") else "ok", st.get("dhan_error") or "none")
+    if not active:
+        add("Market hours", "warn", "market closed - live checks skipped (TRACKER_TEST_NOW.bat runs them now)")
+    else:
+        feed = st.get("feed") or ""
+        import re as _re
+        m = _re.search(r"(\d+)/(\d+) connections", feed)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            add("Live feed connected", "ok" if a == b else "warn" if a else "fail",
+                feed + ("" if a == b else " (some connections still connecting / dropped)"))
+        else:
+            add("Live feed connected", "ok" if "connected" in feed.lower() or "ws" in feed.lower() else "fail", feed)
+        t0 = st.get("ticks") or 0
+        _t.sleep(3)
+        t1 = tracker.status().get("ticks") or 0
+        add("Prices arriving (3 s)", "ok" if t1 > t0 else "fail", f"+{t1 - t0} updates in 3 s")
+        add("Strikes tracked / live", "ok" if st.get("instruments_live") else "fail",
+            f"{st.get('instruments_tracked')} tracked, {st.get('instruments_live')} live, {st.get('stocks_tracked')} stocks")
+        add("IV / greeks", "ok" if st.get("greeks") else "warn", f"{st.get('greeks')} strikes")
+    h = str(st.get("history") or "")
+    add("History (NSE bhavcopy)", "ok" if "trading days" in h else "warn", h or "off")
+    ctx = st.get("context") or {}
+    add("F&O ban list", "ok" if ctx.get("ban_date") and not ctx.get("errors") else "warn",
+        f"{ctx.get('ban_date') or '--'}: {', '.join(ctx.get('ban') or []) or 'none'} {ctx.get('errors') or ''}")
+    add("FII/DII, deals, delivery (NSE)", "fail" if st.get("extra_errors") else "ok", st.get("extra_errors") or "no errors")
+    ne = st.get("news_errors") or {}
+    for src in ("NSE", "Google News", "Dhan"):
+        if src == "Dhan" and not news_hub.dhan_enabled():
+            add("News: Dhan", "warn", "used only when the tracker runs on Dhan")
+            continue
+        add(f"News: {src}", "fail" if src in ne else "ok", ne.get(src) or "no errors")
+    if news_hub.dhan_enabled():
+        add("Dhan news reply", "ok" if news_hub.dhan_polls else "warn", f"{news_hub.dhan_polls} replies so far")
+    try:
+        probe = os.path.join(config.DATA, ".write-test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        days = tracker.history_days()
+        add("Saving history (35-day files)", "ok", f"{len(days)} day(s) saved, kept {config.cfg('trkKeepDays')} days")
+    except Exception as e:
+        add("Saving history (35-day files)", "fail", e)
+    errs = st.get("errors") or {}
+    add("Tracker errors", "fail" if errs else "ok", errs or "none")
+    n = {k: sum(1 for x in out if x["state"] == k) for k in ("ok", "warn", "fail")}
+    return {"time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), "summary": n, "checks": out}
+
+
 @app.get("/api/tracker/settings")
 def tracker_settings_get():
     return {k: config.cfg(k) for k in TRK_SETTINGS}
