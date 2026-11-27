@@ -37,10 +37,13 @@ if not defined PY (
 %PY% -m venv .venv
 if errorlevel 1 ( echo  [X] Setup nishfal. & pause & exit /b 1 )
 :have_venv
-if not exist ".venv\installed.ok" (
+rem --- install / update packages when requirements.txt changed (copy kept in .venv) ---
+fc /b requirements.txt ".venv\requirements.installed" >nul 2>&1
+if errorlevel 1 (
+  echo  Packages install / update thay chhe...
   ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt
   if errorlevel 1 ( echo  [X] Packages install na thaya - internet check karo. & pause & exit /b 1 )
-  echo ok> ".venv\installed.ok"
+  copy /y requirements.txt ".venv\requirements.installed" >nul
 )
 
 rem --- Dhan token: ask once if missing ---
