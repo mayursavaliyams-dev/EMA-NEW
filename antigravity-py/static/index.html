@@ -110,6 +110,13 @@
   .rng{display:inline-block;width:46px;height:6px;background:rgba(255,255,255,.08);border-radius:3px;position:relative;vertical-align:middle}
   .rng i{position:absolute;top:-2px;width:3px;height:10px;background:var(--warn);border-radius:1px}
   .vw-up{color:var(--buy);font-weight:700} .vw-dn{color:var(--sell);font-weight:700}
+  .tfbar{display:flex;flex-wrap:wrap;gap:4px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--bd);font-size:11px;background:rgba(255,255,255,.015)}
+  .tfbar button{background:transparent;border:1px solid var(--bd);color:var(--mut);border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px}
+  .tfbar button.on{color:var(--buy);border-color:var(--buy)} .tfbar button.dn.on{color:var(--sell);border-color:var(--sell)}
+  .tfbar input,.tfbar select{background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px;padding:2px 5px}
+  .tfbar .sep{width:1px;height:16px;background:var(--bd);margin:0 3px} .tfbar .cnt{margin-left:auto;color:var(--mut)}
+  .tfcols{position:absolute;z-index:40;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:8px;max-height:60vh;overflow:auto;display:grid;grid-template-columns:repeat(3,auto);gap:2px 12px;font-size:11px}
+  th.tfs{cursor:pointer} th.tfs:hover{color:var(--buy)}
   .trk-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;align-items:center;justify-content:center}
   .trk-modal.show{display:flex}
   .trk-modal-box{background:var(--card);border:1px solid var(--bd);border-radius:8px;width:min(1200px,96vw);height:min(760px,90vh);display:flex;flex-direction:column}
@@ -194,7 +201,7 @@
   </div>
   <div class="trk-grid">
     <div class="panel">
-      <div class="ph"><span>🚨 Alerts — premium / OI / volume spike vs news</span><span class="flt" id="trk-flt"></span></div>
+      <div class="ph"><span>🚨 Alerts — premium / OI / volume spike vs news</span><span style="display:flex;gap:6px;align-items:center"><select id="trk-day" class="trk-sel" title="saved alerts &amp; trends: one file per day, kept a whole expiry cycle"><option value="">📅 today (live)</option></select><span class="flt" id="trk-flt"></span></span></div>
       <div id="trk-alerts" style="padding:8px;overflow-x:auto"></div>
     </div>
     <div class="panel">
@@ -228,7 +235,7 @@
       <div style="overflow-x:auto"><table id="trk-sdays"></table></div>
       <div style="overflow-x:auto"><table id="trk-sbuild"></table></div>
     </div>
-    <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
+    <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News · NSE filings + Google News + Dhan</span><span class="flt" id="trk-nh"></span></div>
     <div class="trk-news" id="trk-news" style="padding:4px 10px;overflow-x:auto"></div>
   </div>
   <div class="panel" style="margin:0 12px 16px">
@@ -608,6 +615,7 @@ const BU={LB:'Long buildup',SB:'Short buildup',SC:'Short covering',LU:'Long unwi
 const bu=x=>x?`<span class="bu bu-${x}" title="${BU[x]}">${x}</span>`:'';
 const streak=n=>n==null?'--':n===0?'0':`<span class="${n>0?'up':'down'}">${n>0?'▲':'▼'}${Math.abs(n)}d</span>`;
 let TRK_FLT='', TRK_SYM='', TRK_EXP='', TRK_MSORT='move', TRK_SORT='vol', TRK_DESC=true, TRK_SUM=[], TRK_CH=null, TRK_CHK={key:'',sym:'',iv:'1'};
+let TRK_DAY='', TRK_NH=24, TRK_DAYS_T=0;
 let TRK_TFLT='', TRK_HWIN=5, TRK_HIST=[], TRK_HT=0, TRK_UD='', TRK_SLOW_T=0, TRK_NEWS_SYM='', TRK_NEWS_T=0;
 // UP/DOWN row filter: keep a row when its signed value matches the chosen side (rows without a value are hidden while filtering)
 const udOk=v=>!TRK_UD||(v!=null&&(TRK_UD==='UP'?v>0:v<0));
@@ -616,7 +624,7 @@ const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan/ups
   trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkVolOiRatio:'Unusual: Vol/OI ×',
   trkIvSpikePts:'IV spike (pts)',trkIvWindowMin:'IV window (min)',trkTrendBarMin:'Trend candle (min)',trkTrendMinBars:'Trend warm-up candles',trkTrendGreen:'Trend: candles in a row',
   trkTrendMinPct:'Trend min move % (option)',trkTrendMinPctStock:'Trend min move % (stock)',trkMwplAlertPct:'MWPL alert %',trkDelivMult:'Delivery alert: qty ×',trkDelivPctAbove:'Delivery alert: % above avg',trkDealAlerts:'Bulk/block deal alerts',trkTelegramKinds:'Telegram: alert kinds',trkFutPricePct:'Futures buildup: price %',trkFutOiPct:'Futures buildup: OI %',trkBasisMinPct:'Basis flip min %',trkPcrShift:'PCR shift alert',trkStraddlePct:'Straddle expansion %',trkOrbMin:'Opening range (min)',trkAtlAlerts:'All-time LOW alerts',trkAthMaxDistPct:'ATH alert: max dist % from spot',trkHistDays:'History days',
-  trkCooldownMin:'Cooldown (min)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
+  trkCooldownMin:'Cooldown (min)',trkKeepDays:'Keep history (days)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
 const KIND={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst',UNUSUAL:'Unusual Vol/OI',IV:'IV',ATH:'All-time HIGH',ATL:'All-time LOW',TREND:'Trend START',TREND_END:'Trend END',BAN:'F&O BAN',MWPL:'MWPL',OI_SHIFT:'OI wall shift',MAXPAIN:'Max pain shift',EXP_MOVE:'Expected move break',DELIVERY:'Delivery',DEAL:'Bulk/Block deal',FII:'FII/DII',FUT_BUILDUP:'Futures buildup',BASIS:'Futures basis flip',PCR:'PCR shift',STRADDLE:'Straddle expansion',ORB:'Opening-range breakout'};
 const flt=(id,items,cur,fn)=>{$(id).innerHTML=items.map(([v,l])=>`<button data-v="${v}" class="${v===cur?'on':''}">${l}</button>`).join(' ');
   $(id).querySelectorAll('button').forEach(b=>b.onclick=()=>{$(id).querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));fn(b.dataset.v);});};
@@ -624,6 +632,12 @@ flt('trk-flt',[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplaine
 flt('trk-msort',[['move','Price move'],['volume','Volume now'],['oi','OI change'],['unusual','Vol/OI'],['iv','IV']],'move',v=>{TRK_MSORT=v;renderTracker();});
 flt('trk-ud',[['','All'],['UP','▲ UP'],['DOWN','▼ DOWN']],'',v=>{TRK_UD=v;TRK_HT=0;TRK_SLOW_T=0;renderTracker();});
 flt('trk-tflt',[['','All'],['RUNNING','Running'],['ENDED','Ended']],'',v=>{TRK_TFLT=v;renderTrends();});
+flt('trk-nh',[['24','24 h'],['168','7 days'],['840','35 days']],'24',v=>{TRK_NH=+v;TRK_NEWS_T=0;renderLadder();});
+$('trk-day').onchange=e=>{TRK_DAY=e.target.value;TRK_SLOW_T=0;renderTracker();};
+async function trkDays(){ if(Date.now()-TRK_DAYS_T<120000) return; TRK_DAYS_T=Date.now();
+  const d=await j('/api/tracker/days'); const today=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});
+  $('trk-day').innerHTML=`<option value="">📅 today (live)</option>`+(d.days||[]).filter(x=>x!==today).map(x=>`<option ${x===TRK_DAY?'selected':''}>${x}</option>`).join('');
+  $('trk-day').title=`saved alerts & trends: one file per day, kept ${d.keep_days} days (a whole expiry cycle)`; }
 flt('trk-hwin',[['5','5 days'],['10','10 days'],['20','20 days']],'5',v=>{TRK_HWIN=+v;TRK_HT=0;renderHistory();});
 async function trkSettings(){
   const st=await j('/api/tracker/settings');
@@ -700,8 +714,8 @@ async function renderLadder(){
     Object.keys(by).map(Number).sort((a,b)=>a-b).map(k=>`<tr class="${k===atm?'atm':''}">${cell(by[k].CE,'ce')}<td class="strike">${k}</td>${cell(by[k].PE,'pe')}</tr>`).join('')+'</tbody>';
   if(TRK_NEWS_SYM===TRK_SYM && Date.now()-TRK_NEWS_T<60000) return;   // news: on symbol change or once a minute
   TRK_NEWS_SYM=TRK_SYM; TRK_NEWS_T=Date.now();
-  const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
-  $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
+  const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM)+'&hours='+TRK_NH)).items||[];
+  $('trk-news').innerHTML=nw.length?nw.slice(0,300).map(n=>`<div data-dir="${/POS|BULL/i.test(n.sentiment||'')?1:/NEG|BEAR/i.test(n.sentiment||'')?-1:''}" data-kind="${esc((n.source||'').split(' ')[0])}">${n.sentiment?`<span class="${/POS|BULL/i.test(n.sentiment)?'up':/NEG|BEAR/i.test(n.sentiment)?'down':'hl-badge'}">${esc(n.sentiment)}</span> `:''}<span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):`<div class="hl-badge">no news in ${TRK_NH>=48?TRK_NH/24+' days':TRK_NH+'h'}</div>`;
 }
 async function renderStockHist(){
   if(!TRK_SYM) return;
@@ -718,7 +732,7 @@ async function renderStockHist(){
       <td>${(x.labels||[]).map(bu).join('')}</td><td>${x.atl??'--'}/${x.ath??'--'}</td></tr>`).join('')+'</tbody>';
 }
 async function renderTrends(){
-  const tr=((await j('/api/tracker/trends?limit=400'+(TRK_TFLT?'&status='+TRK_TFLT:''))).trends||[]).filter(t=>!TRK_UD||t.dir===TRK_UD).slice(0,200);
+  const tr=((await j('/api/tracker/trends?limit=400'+(TRK_TFLT?'&status='+TRK_TFLT:'')+(TRK_DAY?'&date='+TRK_DAY:''))).trends||[]).filter(t=>!TRK_UD||t.dir===TRK_UD).slice(0,200);
   const T=t=>t?new Date(t*1000).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'}):'--';
   $('trk-trends').innerHTML=`<thead><tr><th>Status</th><th>What</th><th>Dir</th><th>Started from</th><th>Confirmed (alert)</th><th>Ended</th><th>Move %</th><th>Best %</th><th>Candles</th><th>Green/Red</th><th>One-sided</th><th>Max pull-back</th><th>Why started / why ended</th></tr></thead><tbody>`+
     (tr.length?tr.map(t=>`<tr onclick="${t.opt==='STOCK'?`trkChart('', '${esc(t.symbol)}')`:`trkChart('${esc(t.key)}')`}">
@@ -767,7 +781,7 @@ async function renderMarket(){
 async function renderSectors(){
   const sc=(await j('/api/tracker/sectors')).sectors||[];
   const col=v=>{ if(v==null) return 'rgba(255,255,255,.03)'; const a=Math.min(Math.abs(v)/2,1)*0.45+0.05; return v>=0?`rgba(0,245,212,${a})`:`rgba(247,37,133,${a})`; };
-  $('trk-sec').innerHTML=sc.map(o=>`<div class="sec" style="background:${col(o.avg_chg_pct)}">
+  $('trk-sec').innerHTML=sc.map(o=>`<div class="sec" data-dir="${o.avg_chg_pct==null?'':o.avg_chg_pct>0?1:o.avg_chg_pct<0?-1:''}" data-num="${o.avg_chg_pct==null?'':Math.abs(o.avg_chg_pct)}" style="background:${col(o.avg_chg_pct)}">
     <div class="n"><span>${esc(o.sector)}</span><span>${o.avg_chg_pct==null?'--':(o.avg_chg_pct>0?'+':'')+o.avg_chg_pct+'%'}</span></div>
     <div class="m">▲${o.up} ▼${o.down} · ${o.stocks} stocks · fut LB ${o.fut_lb}/SB ${o.fut_sb}${o.alerts?` · 🚨${o.alerts}`:''}<br>
     ${o.members.filter(m=>udOk(m.chg_pct)).slice(0,8).map(m=>`<span onclick="trkPickSym('${esc(m.symbol)}')">${esc(m.symbol)} ${m.chg_pct==null?'':(m.chg_pct>0?'+':'')+m.chg_pct+'%'}</span>`).join(' · ')}</div></div>`).join('');
@@ -787,12 +801,14 @@ async function renderTracker(){
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
    + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
 
-  const al=(await j('/api/tracker/alerts?limit=100'+(TRK_FLT?'&status='+TRK_FLT:'')+(TRK_UD?'&dir='+TRK_UD:''))).alerts||[];
+  const alUD=(TF['trk-alerts']&&TF['trk-alerts'].ud)||TRK_UD;
+  const al=(await j('/api/tracker/alerts?limit=200'+(TRK_FLT?'&status='+TRK_FLT:'')+(alUD?'&dir='+alUD:'')+(TRK_DAY?'&date='+TRK_DAY:''))).alerts||[];
   $('trk-alerts').innerHTML=al.length?al.map(a=>{
     const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.opt==='FUT'?'futures':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
     const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
     const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
-    return `<div class="trk-alert ${esc(a.status)}">
+    const aopt=[...new Set(a.legs.map(l=>l.opt))].join(' ');
+    return `<div class="trk-alert ${esc(a.status)}" data-dir="${a.dir==='UP'?1:a.dir==='DOWN'?-1:''}" data-opt="${esc(aopt)}" data-kind="${esc(KIND[a.kind]||a.kind)}" data-num="${Math.abs(parseFloat(a.max_pct))||''}">
       <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
         <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span>
           <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})}
@@ -804,7 +820,8 @@ async function renderTracker(){
     </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet.</div>`;
 
   const mvSign=r=>TRK_MSORT==='oi'?r.oi_chg_pct:TRK_MSORT==='move'?r.chg_win_pct:(r.chg_pct??r.chg_win_pct);
-  const mv=(await j('/api/tracker/board?limit=60&sort='+TRK_MSORT+(TRK_UD?'&sign='+TRK_UD:''))).rows||[];
+  const mvUD=(TF['trk-movers']&&TF['trk-movers'].ud)||TRK_UD;
+  const mv=(await j('/api/tracker/board?limit=100&sort='+TRK_MSORT+(mvUD?'&sign='+mvUD:''))).rows||[];
   $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>Vol/OI</th><th>OI chg%</th><th>Act.</th><th>IV</th></tr></thead><tbody>`+
     mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')" title="${tip(r)}"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
       <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${r.vol_oi??'--'}</td><td>${pc(r.oi_chg_pct)}</td><td>${bu(r.buildup)}</td><td>${r.iv??'--'}</td></tr>`).join('')+'</tbody>';
@@ -816,7 +833,7 @@ async function renderTracker(){
   if(!TRK_SYM && syms.length) TRK_SYM=syms.includes('RELIANCE')?'RELIANCE':syms[0];
   if($('trk-sym').options.length!==syms.length) $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join('');
   $('trk-sym').value=TRK_SYM;
-  await Promise.all([renderLadder(), slow?renderTrends():null, renderHistory(), renderMarket(), slow?renderSectors():null, first?renderStockHist():null]);
+  await Promise.all([trkDays(), renderLadder(), slow?renderTrends():null, renderHistory(), renderMarket(), slow?renderSectors():null, first?renderStockHist():null]);
 }
 // ---- chart: candles + VWAP + volume + OI ----
 $('trk-ch-tf').innerHTML=['1','5','15','60'].map(v=>`<button data-v="${v}" class="${v==='1'?'on':''}">${v}m</button>`).join('');
@@ -855,6 +872,133 @@ async function trkLoadChart(){
       ...(hasOI?[{type:'line',name:'OI',yAxis:2,data:c.filter(x=>x.oi!=null).map(x=>[ms(x.time),Number(x.oi)]),color:'#8fa8ff'}]:[])]
   });
 }
+
+// ======================================================================
+// Per-table filters: ▲UP/▼DOWN (by any column), search, CE/PE, buildup,
+// any-column min/max, sort by any header, show/hide columns, row limit.
+// State is kept per table in localStorage and re-applied after every refresh.
+// ======================================================================
+const TF_CFG={
+  'trk-movers':{dir:4,opt:1,bu:true},
+  'trk-trends':{dir:2,opt:1},
+  'trk-hist':{dir:1,bu:true},
+  'trk-sum':{dir:2,bu:true,own:true},
+  'trk-ladder':{dir:1,bu:true,atm:true,noSort:true},
+  'trk-sdays':{dir:3,bu:true},
+  'trk-sbuild':{dir:3,opt:0,bu:true},
+  'trk-deals':{dir:2},
+  'trk-part':{dir:1},
+  'trk-alerts':{items:true,opt:true,kind:true,num:'Move/×'},
+  'trk-news':{items:true,kind:true,udLbl:['▲ Positive','▼ Negative']},
+  'trk-sec':{items:true,num:'Avg move %'},
+};
+let TF={}; try{ TF=JSON.parse(localStorage.getItem('trkTF')||'{}')||{}; }catch(e){ TF={}; }
+const tfSave=()=>{ try{ localStorage.setItem('trkTF',JSON.stringify(TF)); }catch(e){} };
+const TF_DEF={ud:'',q:'',opt:'',bu:'',kind:'',fc:'',fmin:'',fmax:'',sc:null,desc:true,lim:0,hide:[],atm:0,dc:null};
+const tfS=id=>{ const o=TF[id]||(TF[id]={}); for(const k in TF_DEF) if(!(k in o)) o[k]=Array.isArray(TF_DEF[k])?[]:TF_DEF[k]; return o; };
+const tfNum=t=>{ const m=String(t).replace(/,/g,'').match(/[-+]?\d*\.?\d+/); return m?parseFloat(m[0]):null; };
+function tfSign(t){ t=String(t).trim(); if(!t||t==='--') return null;
+  if(/▲|↗|\bBUY\b|\bUP\b|POSITIVE/i.test(t)) return 1; if(/▼|↘|\bSELL\b|\bDOWN\b|NEGATIVE/i.test(t)) return -1;
+  const n=tfNum(t); return n==null||n===0?null:(n>0?1:-1); }
+function tfHeads(id){ const t=$(id); return t&&t.tagName==='TABLE'?[...t.querySelectorAll('thead th')].map(h=>h.textContent.replace(/ [▲▼]$/,'').trim()):[]; }
+function tfBar(id){
+  const cfg=TF_CFG[id], el=$(id); if(!el) return null;
+  let bar=document.getElementById('tfb-'+id); if(bar) return bar;
+  bar=document.createElement('div'); bar.className='tfbar'; bar.id='tfb-'+id;
+  const host=cfg.items?el:el.parentElement; host.parentElement.insertBefore(bar,host);
+  return bar;
+}
+function tfRenderBar(id){
+  const cfg=TF_CFG[id], st=tfS(id), bar=tfBar(id); if(!bar) return;
+  const heads=tfHeads(id), ul=cfg.udLbl||['▲ UP','▼ DOWN'];
+  const sel=(k,opts,cur)=>`<select data-k="${k}">${opts.map(([v,l])=>`<option value="${esc(v)}" ${String(v)===String(cur)?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
+  const colOpts=heads.map((h,i)=>[i,h]);
+  const kinds=cfg.kind?[...new Set([...$(id).children].map(c=>c.dataset.kind).filter(Boolean))].sort():[];
+  if(st.kind&&!kinds.includes(st.kind)) kinds.push(st.kind);
+  const sig=JSON.stringify([heads,kinds]);
+  if(bar.dataset.sig===sig && bar.dataset.st===JSON.stringify(st)) return;
+  bar.dataset.sig=sig; bar.dataset.st=JSON.stringify(st);
+  bar.innerHTML=
+    `<button data-ud="" class="${!st.ud?'on':''}">All</button><button data-ud="UP" class="${st.ud==='UP'?'on':''}">${ul[0]}</button><button data-ud="DOWN" class="dn ${st.ud==='DOWN'?'on':''}">${ul[1]}</button>`
+    +(heads.length?` <span class="hl-badge">by</span>${sel('dc',colOpts,st.dc??cfg.dir)}`:'')
+    +`<span class="sep"></span><input data-k="q" placeholder="search (RELIANCE,HDFCBANK…)" value="${esc(st.q)}" style="width:170px">`
+    +(cfg.opt!=null?`<span class="sep"></span>${['','CE','PE'].map(o=>`<button data-opt="${o}" class="${st.opt===o?'on':''}">${o||'CE+PE'}</button>`).join('')}`:'')
+    +(cfg.bu?`<span class="sep"></span>${[['','All act.'],['LB','LB'],['SB','SB'],['SC','SC'],['LU','LU']].map(([v,l])=>`<button data-bu="${v}" class="${st.bu===v?'on':''}" title="${BU[v]||'any buildup'}">${l}</button>`).join('')}`:'')
+    +(cfg.kind?`<span class="sep"></span>${sel('kind',[['','all types'],...kinds.map(k=>[k,k])],st.kind)}`:'')
+    +(cfg.atm?`<span class="sep"></span>${sel('atm',[[0,'all strikes'],[3,'ATM ±3'],[5,'ATM ±5'],[10,'ATM ±10'],[20,'ATM ±20']],st.atm)}`:'')
+    +`<span class="sep"></span>${heads.length?sel('fc',[['','filter column…'],...colOpts],st.fc):`<span class="hl-badge">${esc(cfg.num||'value')}</span>`}`
+    +`<input data-k="fmin" placeholder="min" value="${esc(st.fmin)}" style="width:58px"><input data-k="fmax" placeholder="max" value="${esc(st.fmax)}" style="width:58px">`
+    +`<span class="sep"></span>${sel('lim',[[0,'all rows'],[10,'10 rows'],[25,'25 rows'],[50,'50 rows'],[100,'100 rows']],st.lim)}`
+    +(heads.length?` <button data-cols="1" title="show / hide columns">Columns${st.hide.length?' ('+st.hide.length+' hidden)':''}</button>`:'')
+    +` <button data-reset="1" title="clear this table's filters">Reset</button><span class="cnt" id="tfc-${id}"></span>`;
+  const set=(k,v)=>{ st[k]=v; tfSave(); tfApply(id); };
+  bar.querySelectorAll('[data-ud]').forEach(b=>b.onclick=()=>set('ud',b.dataset.ud)||(TRK_SLOW_T=0,['trk-movers','trk-alerts'].includes(id)&&renderTracker()));
+  bar.querySelectorAll('[data-opt]').forEach(b=>b.onclick=()=>set('opt',b.dataset.opt));
+  bar.querySelectorAll('[data-bu]').forEach(b=>b.onclick=()=>set('bu',b.dataset.bu));
+  bar.querySelectorAll('select[data-k]').forEach(x=>x.onchange=()=>set(x.dataset.k,['lim','atm'].includes(x.dataset.k)?+x.value:(x.dataset.k==='dc'?+x.value:x.value)));
+  bar.querySelectorAll('input[data-k]').forEach(x=>x.oninput=()=>{ st[x.dataset.k]=x.value; tfSave(); clearTimeout(x._t); x._t=setTimeout(()=>tfApply(id,true),250); });
+  const rb=bar.querySelector('[data-reset]'); rb.onclick=()=>{ for(const k of Object.keys(st)) delete st[k]; tfS(id); tfSave(); tfApply(id); };
+  const cb=bar.querySelector('[data-cols]'); if(cb) cb.onclick=e=>tfColsMenu(id,e);
+}
+function tfColsMenu(id,e){
+  document.querySelectorAll('.tfcols').forEach(x=>x.remove());
+  const st=tfS(id), heads=tfHeads(id), m=document.createElement('div'); m.className='tfcols';
+  m.innerHTML=heads.map((h,i)=>`<label><input type="checkbox" data-i="${i}" ${st.hide.includes(i)?'':'checked'}> ${esc(h)}</label>`).join('')
+    +`<div style="grid-column:1/-1;display:flex;gap:6px;margin-top:6px"><button class="tg" data-all="1">show all</button><button class="tg" data-close="1">close</button></div>`;
+  document.body.appendChild(m); const r=e.target.getBoundingClientRect();
+  m.style.left=Math.max(8,Math.min(r.left+scrollX,innerWidth-420))+'px'; m.style.top=(r.bottom+scrollY+4)+'px';
+  m.querySelectorAll('input').forEach(c=>c.onchange=()=>{ const i=+c.dataset.i; st.hide=c.checked?st.hide.filter(x=>x!==i):[...st.hide,i]; tfSave(); tfApply(id); });
+  m.querySelector('[data-all]').onclick=()=>{ st.hide=[]; tfSave(); tfApply(id); m.remove(); };
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+}
+function tfApply(id, keepBar){
+  const cfg=TF_CFG[id], el=$(id); if(!cfg||!el) return;
+  const st=tfS(id);
+  if(!keepBar) tfRenderBar(id);
+  const toks=String(st.q||'').toUpperCase().split(',').map(x=>x.trim()).filter(Boolean);
+  const fmin=st.fmin===''?null:parseFloat(st.fmin), fmax=st.fmax===''?null:parseFloat(st.fmax);
+  let rows, shown=0, total=0;
+  if(cfg.items){
+    rows=[...el.children].filter(c=>c.tagName!=='STYLE');
+    rows.forEach(r=>{ total++;
+      const d=r.dataset.dir===''||r.dataset.dir==null?null:+r.dataset.dir;
+      let ok=(!st.ud||(st.ud==='UP'?d===1:d===-1))
+        &&(!toks.length||toks.some(t=>r.textContent.toUpperCase().includes(t)))
+        &&(!st.opt||(r.dataset.opt||'').split(' ').includes(st.opt))
+        &&(!st.kind||r.dataset.kind===st.kind);
+      if(ok&&(fmin!=null||fmax!=null)){ const n=r.dataset.num===''||r.dataset.num==null?null:+r.dataset.num; ok=n!=null&&(fmin==null||n>=fmin)&&(fmax==null||n<=fmax); }
+      if(ok&&st.lim&&shown>=st.lim) ok=false;
+      r.style.display=ok?'':'none'; if(ok) shown++; });
+  } else {
+    const tb=el.tBodies[0]; if(!tb) return;
+    const ths=[...el.querySelectorAll('thead th')];
+    if(!cfg.own&&!cfg.noSort) ths.forEach((h,i)=>{ h.classList.add('tfs'); h.onclick=()=>{ st.desc=st.sc===i?!st.desc:true; st.sc=i; tfSave(); tfApply(id,true); };
+      h.textContent=h.textContent.replace(/ [▲▼]$/,'')+(st.sc===i?(st.desc?' ▼':' ▲'):''); });
+    rows=[...tb.rows];
+    if(!cfg.own&&!cfg.noSort&&st.sc!=null){
+      const v=r=>{ const c=r.cells[st.sc]; if(!c) return null; const n=tfNum(c.textContent); return n==null?c.textContent.trim():n; };
+      rows.sort((a,b)=>{ const x=v(a),y=v(b); const c=(typeof x==='number'&&typeof y==='number')?x-y:String(x??'').localeCompare(String(y??'')); return st.desc?-c:c; });
+      rows.forEach(r=>tb.appendChild(r));
+    }
+    const dc=st.dc??cfg.dir, atmI=cfg.atm&&st.atm?rows.findIndex(r=>r.classList.contains('atm')):-1;
+    rows.forEach((r,ri)=>{ if(r.cells.length<2){ r.style.display=''; return; } total++;
+      const sgn=dc!=null&&r.cells[dc]?tfSign(r.cells[dc].textContent):null;
+      let ok=(!st.ud||(st.ud==='UP'?sgn===1:sgn===-1))
+        &&(!toks.length||toks.some(t=>r.textContent.toUpperCase().includes(t)))
+        &&(!st.opt||cfg.opt==null||(r.cells[cfg.opt]&&r.cells[cfg.opt].textContent.toUpperCase().includes(st.opt)))
+        &&(!st.bu||!!r.querySelector('.bu-'+st.bu))
+        &&(atmI<0||Math.abs(ri-atmI)<=st.atm);
+      if(ok&&st.fc!==''&&(fmin!=null||fmax!=null)){ const c=r.cells[+st.fc]; const n=c?tfNum(c.textContent):null; ok=n!=null&&(fmin==null||n>=fmin)&&(fmax==null||n<=fmax); }
+      if(ok&&st.lim&&shown>=st.lim) ok=false;
+      r.style.display=ok?'':'none'; if(ok) shown++; });
+    let css=document.getElementById('tfcss-'+id); if(!css){ css=document.createElement('style'); css.id='tfcss-'+id; document.head.appendChild(css); }
+    css.textContent=st.hide.map(i=>`#${id} tr > :nth-child(${i+1}){display:none}`).join('\n');
+  }
+  const c=document.getElementById('tfc-'+id); if(c) c.textContent=`showing ${shown} / ${total}`;
+}
+// re-apply after every refresh (tables are rebuilt every few seconds)
+Object.keys(TF_CFG).forEach(id=>{ const el=$(id); if(!el) return;
+  new MutationObserver(()=>tfApply(id)).observe(el,{childList:true}); tfApply(id); });
 
 renderTF(); renderOptTF(); renderST(); loadIndexChart(); loadAll();
 let TRK_BUSY=false, TICK_N=0;

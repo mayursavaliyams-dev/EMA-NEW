@@ -25,6 +25,8 @@ from trackers import providers as P
 TMP = tempfile.mkdtemp()
 T.ALERTS_PATH = os.path.join(TMP, "alerts.json")          # never touch real data
 T.TRENDS_PATH = os.path.join(TMP, "trends.json")
+T.ALERTS_DIR = os.path.join(TMP, "alerts")                  # day files (kept one expiry cycle)
+T.TRENDS_DIR = os.path.join(TMP, "trends")
 SET = dict(T.SETTINGS, trkAlwaysOn=True)
 T.setting = lambda k: SET[k]
 IST = T.IST
@@ -534,7 +536,7 @@ def test_trend_saved_and_alerted():
         t.on_data(k, {"ltp": v}, base + i * bar + bar - 1)
     t._drain_events()
     t._save_trends()
-    saved = json.load(open(T.TRENDS_PATH))
+    saved = [x for d in t.trend_store.days() for x in t.trend_store.load_day(d)]
     check("trend record saved to disk with start/end details",
           saved and saved[-1]["symbol"] == "STK2" and saved[-1]["status"] == "ENDED"
           and saved[-1]["started_time"] and saved[-1]["ended_time"] and saved[-1]["reason_end"])
@@ -830,12 +832,45 @@ def test_dhan_news_and_805():
           d.fatal and "5" in d.fatal and not d.available())
 
 
+def test_day_store_month():
+    """Alerts / trends / news kept per day for a whole expiry cycle (trkKeepDays), not 24 h."""
+    from trackers.store import DayStore, ist_day
+    from trackers.news import NewsHub
+    d = DayStore(os.path.join(TMP, "ds"), keep_days=35)
+    now = time.time()
+    for back in (0, 1, 20, 34, 40):
+        ts = now - back * 86400
+        d.merge_day(ist_day(ts), [{"id": f"a{back}", "ts": ts}])
+    d.merge_day(ist_day(now), [{"id": "a0", "ts": now, "v": 2}, {"id": "b0", "ts": now}])
+    check("day files: merge de-duplicates by id (newer copy wins)",
+          len(d.load_day(ist_day(now))) == 2 and next(x for x in d.load_day(ist_day(now)) if x["id"] == "a0").get("v") == 2)
+    d.prune(now)
+    check("day files: 34-day-old kept, 40-day-old pruned (35-day keep)",
+          ist_day(now - 34 * 86400) in d.days() and ist_day(now - 40 * 86400) not in d.days())
+    check("day files: load_since spans days", {x["id"] for x in d.load_since(now - 21 * 86400)} == {"a0", "b0", "a1", "a20"})
+    t, p, n = make()
+    t.alerts.clear()
+    old = {"id": 1, "symbol": "STK1", "time": ist_day(now - 3 * 86400) + " 10:00:00", "ts": now - 3 * 86400, "status": "UNEXPLAINED", "legs": []}
+    t.alert_store.save_day(ist_day(old["ts"]), [old])
+    check("old day's alerts readable by date + listed in days",
+          t.alerts_for_day(ist_day(old["ts"]))[0]["id"] == 1 and ist_day(old["ts"]) in t.history_days())
+    h = NewsHub(store_dir=os.path.join(TMP, "news"), keep_days=35)
+    it = {"source": "NSE", "symbol": "STK1", "id": "nse:old", "time": "", "ts": now - 10 * 86400, "title": "old filing", "summary": "", "url": ""}
+    h.store.merge_day(ist_day(it["ts"]), [it])
+    h._store_nse([{**it, "id": "nse:new", "ts": now - 60, "title": "new filing"}])
+    h.persist(force=True)
+    check("news: 10-day-old item served for a 30-day window, not for 24 h",
+          {x["id"] for x in h.latest_nse(since_ts=now - 30 * 86400)} == {"nse:old", "nse:new"}
+          and {x["id"] for x in h.latest_nse(since_ts=now - 86400)} == {"nse:new"})
+    check("news: today's items persisted to the day file", any(x["id"] == "nse:new" for x in h.store.load_day(ist_day(now))))
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

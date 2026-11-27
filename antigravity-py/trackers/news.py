@@ -185,7 +185,7 @@ def parse_dhan_news(payload, sid_map, default_symbol=None, now=None):
 
 
 class NewsHub:
-    def __init__(self, nse_ttl=60, gnews_ttl=180, keep_hours=36):
+    def __init__(self, nse_ttl=60, gnews_ttl=180, keep_hours=36, store_dir=None, keep_days=35):
         self._c = httpx.Client(headers={"User-Agent": UA, "Accept": "application/json, */*",
                                         "Accept-Language": "en-US,en;q=0.9",
                                         "Referer": "https://www.nseindia.com/"},
@@ -206,6 +206,47 @@ class NewsHub:
         self.dhan_ttl = 120
         self.dhan_raw = None          # last raw reply (to check Dhan's real field names)
         self.dhan_polls = 0
+        # every headline is also saved per day (store_dir) for a whole expiry cycle (keep_days)
+        self.store = None
+        if store_dir:
+            from trackers.store import DayStore
+            self.store = DayStore(store_dir, keep_days)
+        self._t_persist = 0.0
+
+    # ---------------- day-file persistence (a month of news) ----------------
+    def _all_mem(self):
+        with self._lock:
+            items = list(self._nse_items.values()) + list(self._dhan_items.values())
+            for _, lst in self._gnews.values():
+                items.extend(lst)
+        return items
+
+    def persist(self, force=False):
+        if not self.store or (not force and time.time() - self._t_persist < 300):
+            return
+        self._t_persist = time.time()
+        from trackers.store import ist_day
+        by = {}
+        for it in self._all_mem():
+            by.setdefault(ist_day(it["ts"]), []).append(it)
+        try:
+            for d, items in by.items():
+                self.store.merge_day(d, items)
+            self.errors.pop("save", None)
+        except Exception as e:
+            self.errors["save"] = str(e)[:200]
+
+    def _older(self, since_ts, symbol=None, symbols=None):
+        """Saved items older than what is held in memory (only when the window reaches that far)."""
+        mem_from = (datetime.now(IST) - self.keep).timestamp()
+        if not self.store or since_ts is None or since_ts >= mem_from:
+            return []
+        out = [x for x in self.store.load_since(since_ts) if x.get("ts", 0) < mem_from]
+        if symbol:
+            out = [x for x in out if x.get("symbol") == symbol]
+        if symbols is not None:
+            out = [x for x in out if x.get("symbol") in symbols]
+        return out
 
     # ---------------- NSE ----------------
     def _nse_fetch(self, symbol=None):
@@ -241,6 +282,7 @@ class NewsHub:
                 del self._nse_items[k]
 
     def poll_nse(self, force=False):
+        self.persist()
         if not force and time.time() - self._nse_last < self.nse_ttl:
             return
         self._nse_last = time.time()
@@ -348,16 +390,24 @@ class NewsHub:
     def news_for(self, symbol, name, since_ts=None, until_ts=None, fetch=True):
         items = self.nse_for(symbol, fetch) + self.gnews_for(symbol, name, fetch) + self.dhan_for(symbol, fetch)
         if since_ts is not None:
+            seen = {i["id"] for i in items}
+            items += [x for x in self._older(since_ts, symbol=symbol.upper()) if x.get("id") not in seen]
+        if since_ts is not None:
             items = [i for i in items if i["ts"] >= since_ts]
         if until_ts is not None:
             items = [i for i in items if i["ts"] <= until_ts]
         items.sort(key=lambda i: i["ts"], reverse=True)
         return items
 
-    def latest_nse(self, symbols=None, limit=100):
+    def latest_nse(self, symbols=None, limit=100, since_ts=None):
         """Latest exchange filings + Dhan headlines (the dashboard's global news list)."""
         with self._lock:
             items = list(self._nse_items.values()) + [v for v in self._dhan_items.values() if v["symbol"]]
+        if since_ts is not None:
+            seen = {i["id"] for i in items}
+            items += [x for x in self._older(since_ts) if x.get("id") not in seen
+                      and (x.get("source") == "NSE" or (str(x.get("source", "")).startswith("Dhan") and x.get("symbol")))]
+            items = [i for i in items if i["ts"] >= since_ts]
         if symbols is not None:
             items = [i for i in items if i["symbol"] in symbols]
         items.sort(key=lambda i: i["ts"], reverse=True)

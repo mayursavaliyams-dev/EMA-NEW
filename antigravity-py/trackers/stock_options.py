@@ -32,6 +32,7 @@ from datetime import datetime, timezone, timedelta
 
 import config
 from trackers.providers import DhanProvider, UpstoxProvider
+from trackers.store import DayStore, ist_day
 from trackers.history import History, label as bu_label, LABELS
 from trackers.nse_context import NseContext
 from trackers.nse_extra import NseExtra
@@ -42,6 +43,8 @@ from trackers import ivcalc
 IST = timezone(timedelta(hours=5, minutes=30))
 ALERTS_PATH = os.path.join(config.DATA, "tracker_alerts.json")
 TRENDS_PATH = os.path.join(config.DATA, "tracker_trends.json")
+ALERTS_DIR = os.path.join(config.DATA, "alerts")       # one file per day, kept trkKeepDays
+TRENDS_DIR = os.path.join(config.DATA, "trends")
 HARD_CAP = 25000
 
 SETTINGS = {
@@ -86,6 +89,7 @@ SETTINGS = {
     "trkNewsAfterMin": 60,      # keep re-checking UNEXPLAINED alerts this long
     "trkRebalanceMin": 3,       # re-centre ATM window / diff subscription
     "trkQuotePollSec": 30,      # REST snapshot pace (auto-slowed to respect broker limits)
+    "trkKeepDays": 35,          # keep alerts / trends / news this many days (one full monthly expiry cycle)
     "trkAlwaysOn": False,       # True = run outside market hours too (testing)
 }
 for _k, _v in SETTINGS.items():
@@ -449,8 +453,10 @@ class StockOptionsTracker:
         self.spots = {}
         self.greeks = {}                  # key -> {iv, delta, gamma, theta, vega}
         self.ivwin = defaultdict(_Win)
-        self.alerts = deque(maxlen=2000)
-        self.trends = deque(maxlen=5000)
+        self.alerts = deque(maxlen=50000)           # in memory: the last ~2 days; older days are read from day files
+        self.trends = deque(maxlen=50000)
+        keep = int(setting("trkKeepDays") or 35)
+        self.alert_store, self.trend_store = DayStore(ALERTS_DIR, keep), DayStore(TRENDS_DIR, keep)
         self._alert_seq = 0
         self._once = {}                   # once-per-day alert keys -> date
         self._events = queue.Queue()
@@ -469,12 +475,35 @@ class StockOptionsTracker:
         self._load()
 
     # ---------------- persistence ----------------
+    @staticmethod
+    def _alert_day(a):
+        return str(a.get("time") or "")[:10] or ist_day(a.get("ts") or time.time())
+
+    @staticmethod
+    def _trend_day(t):
+        return ist_day(t.get("confirmed_at") or t.get("started_at") or time.time())
+
     def _load(self):
-        for path, dq in ((ALERTS_PATH, self.alerts), (TRENDS_PATH, self.trends)):
+        # one-time migration of the old single files into day files
+        for path, store, dayf in ((ALERTS_PATH, self.alert_store, self._alert_day), (TRENDS_PATH, self.trend_store, self._trend_day)):
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        old = json.load(f)
+                    by = defaultdict(list)
+                    for x in old:
+                        by[dayf(x)].append(x)
+                    for d, items in by.items():
+                        store.merge_day(d, items)
+                    os.replace(path, path + ".migrated")
+                except Exception as e:
+                    self.stats["errors"]["migrate"] = str(e)[:200]
+        for store, dq, dayf in ((self.alert_store, self.alerts, self._alert_day), (self.trend_store, self.trends, self._trend_day)):
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    for a in json.load(f)[-dq.maxlen:]:
-                        dq.append(a)
+                store.prune()
+                for d in store.days()[-2:]:                 # today + the previous session in memory
+                    for x in store.load_day(d):
+                        dq.append(x)
             except Exception:
                 pass
         self._alert_seq = max((a.get("id", 0) for a in self.alerts), default=0)
@@ -491,12 +520,34 @@ class StockOptionsTracker:
         except Exception as e:
             self.stats["errors"]["save"] = str(e)[:200]
 
+    def _save_days(self, store, items, dayf, only_recent=True):
+        by = defaultdict(list)
+        for x in items:
+            by[dayf(x)].append(x)
+        days = sorted(by)
+        for d in (days[-2:] if only_recent else days):    # only the live days are rewritten
+            try:
+                store.save_day(d, by[d])
+            except Exception as e:
+                self.stats["errors"]["save"] = str(e)[:200]
+
     def _save_alerts(self):
-        self._dump(ALERTS_PATH, list(self.alerts))
+        self._save_days(self.alert_store, list(self.alerts), self._alert_day)
 
     def _save_trends(self):
-        self._dump(TRENDS_PATH, list(self.trends))
+        self._save_days(self.trend_store, list(self.trends), self._trend_day)
         self._dirty_trends = False
+
+    def history_days(self):
+        return sorted(set(self.alert_store.days()) | set(self.trend_store.days()), reverse=True)
+
+    def alerts_for_day(self, day):
+        live = [a for a in self.alerts if self._alert_day(a) == day]
+        return live if live else self.alert_store.load_day(day)
+
+    def trends_for_day(self, day):
+        live = [t for t in self.trends if self._trend_day(t) == day]
+        return live if live else self.trend_store.load_day(day)
 
     # ---------------- lifecycle ----------------
     def start(self):

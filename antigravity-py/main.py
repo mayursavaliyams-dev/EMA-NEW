@@ -23,7 +23,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 conn = UpstoxConnector()
 engine = StrangleEngine(conn)
-news_hub = NewsHub()
+news_hub = NewsHub(store_dir=os.path.join(config.DATA, "news"), keep_days=int(config.cfg("trkKeepDays") or 35))
 tracker = StockOptionsTracker(conn, news_hub)   # side tracker: display only, no orders
 app = FastAPI(title="Antigravity-Py", version="0.1")
 from fastapi.middleware.gzip import GZipMiddleware
@@ -182,8 +182,9 @@ def tracker_status():
 
 
 @app.get("/api/tracker/alerts")
-def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12):
-    out = list(tracker.alerts)
+def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12, date: str = ""):
+    """date=YYYY-MM-DD reads that day's saved alerts (kept trkKeepDays, one monthly expiry cycle)."""
+    out = tracker.alerts_for_day(date) if date else list(tracker.alerts)
     if status:
         out = [a for a in out if a["status"] == status.upper()]
     if symbol:
@@ -307,9 +308,19 @@ def tracker_export(what: str = "alerts", fmt: str = "csv"):
 
 
 @app.get("/api/tracker/trends")
-def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
+def tracker_trends(status: str = "", symbol: str = "", limit: int = 300, date: str = ""):
     """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""
+    if date:
+        out = [t for t in reversed(tracker.trends_for_day(date))
+               if (not status or t.get("status") == status.upper()) and (not symbol or t.get("symbol") == symbol.upper())]
+        return {"trends": out[:limit]}
     return {"trends": tracker.trend_list(status or None, symbol or None, limit)}
+
+
+@app.get("/api/tracker/days")
+def tracker_days():
+    """Days with saved alerts / trends (newest first) and how long they are kept."""
+    return {"days": tracker.history_days(), "keep_days": config.cfg("trkKeepDays") or 35}
 
 
 @app.get("/api/tracker/history")
@@ -383,7 +394,7 @@ def tracker_news(symbol: str = "", hours: float = 24):
         _news_refresh(sym, s.get("name", sym))
         return {"items": news_hub.news_for(sym, s.get("name", sym), since_ts=since, fetch=False)}
     fo = set(tracker.u.stocks) or None
-    return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
+    return {"items": news_hub.latest_nse(fo, limit=300, since_ts=since)}
 
 
 @app.get("/api/tracker/news/dhan-raw")
