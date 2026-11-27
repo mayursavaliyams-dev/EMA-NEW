@@ -203,6 +203,12 @@ def tracker_summary():
     return {"stocks": tracker.summary()}
 
 
+@app.get("/api/tracker/futures")
+def tracker_futures():
+    """Front-month stock futures: price, basis (premium/discount), OI change, buildup, rollover %."""
+    return {"futures": tracker.futures()}
+
+
 @app.get("/api/tracker/trends")
 def tracker_trends(status: str = "", symbol: str = "", limit: int = 300):
     """Saved trend records: where each trend started, when it was confirmed, why, and how/why it ended."""

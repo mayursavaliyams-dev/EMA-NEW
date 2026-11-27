@@ -69,6 +69,9 @@ SETTINGS = {
     "trkPcrShift": 0.25,        # PCR alert: intraday PCR moves this much from the day's first reading
     "trkStraddlePct": 15,       # ATM straddle (CE+PE) premium expands this % from the day's first reading
     "trkOrbMin": 15,            # stock opening range = first N minutes from 09:15
+    "trkFutPricePct": 1.0,      # FUT_BUILDUP: futures price moved >= this % vs previous close ...
+    "trkFutOiPct": 5,           # ... and futures OI moved >= this % vs previous day
+    "trkBasisMinPct": 0.1,      # BASIS flip alert only when |basis| >= this % on the new side
     "trkMwplAlertPct": 90,      # alert when a stock's MWPL usage crosses this (ban at 95)
     "trkHistDays": 100,         # NSE bhavcopy lookback for multi-day OI / all-time high-low
     "trkCooldownMin": 15,       # same contract+kind+direction won't re-alert inside this
@@ -110,6 +113,7 @@ def session_open_ts(ts):
 class Universe:
     def __init__(self):
         self.stocks = {}        # symbol -> {symbol, underlying_key, name, lot, options{exp_ms: {strike: {CE,PE}}}}
+        self.futs = {}          # symbol -> [futures rows by expiry]
         self.loaded_at = 0.0
 
     def build(self, rows):
@@ -134,6 +138,17 @@ class Universe:
                                 self._add(stocks[sym], exp, k, opt, leg["key"], leg.get("ts"))
         self.stocks = stocks
         self.loaded_at = time.time()
+
+    def build_futures(self, rows):
+        """Stock futures per symbol, ascending expiry (only symbols that have options)."""
+        today_ms = int(now_ist().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        futs = {}
+        for r in rows or []:
+            if r["symbol"] in self.stocks and r["expiry_ms"] >= today_ms:
+                futs.setdefault(r["symbol"], []).append(r)
+        for v in futs.values():
+            v.sort(key=lambda r: r["expiry_ms"])
+        self.futs = futs
 
     @staticmethod
     def _add(s, exp, strike, opt, key, tsym=None):
@@ -409,6 +424,7 @@ class StockOptionsTracker:
         self.sel = {}                     # key -> meta (everything tracked)
         self.live_keys = set()            # subset streamed over WebSocket
         self.ukeys = {}                   # underlying key -> symbol (streamed for live spot + stock trends)
+        self.fut_meta = {}                # futures key -> {symbol, expiry, front, lot}  (front + next month)
         self.latest = {}                  # key -> fields
         self.spots = {}
         self.greeks = {}                  # key -> {iv, delta, gamma, theta, vega}
@@ -535,6 +551,8 @@ class StockOptionsTracker:
         if now - self._t_master > 3600 or not self.u.stocks:
             self._t_master = now
             self.u.build(self.p.load_rows())
+            if hasattr(self.p, "load_futures"):
+                self.u.build_futures(self.p.load_futures())
         if now - self._t_rebal > setting("trkRebalanceMin") * 60 or not self.sel:
             self._t_rebal = now
             self.rebalance()
@@ -568,9 +586,18 @@ class StockOptionsTracker:
         for k, v in spots.items():          # keep a fresher streamed spot if we have one
             self.spots[k] = self.spots.get(k) or v
         self.spots.update({k: v for k, v in spots.items() if k not in self.latest})
+        fut_meta = {}
+        cut = now_ist()
+        for sym, fl in self.u.futs.items():
+            ahead = [f for f in fl if datetime.fromtimestamp(f["expiry_ms"] / 1000, IST).date() > cut.date()
+                     or (datetime.fromtimestamp(f["expiry_ms"] / 1000, IST).date() == cut.date() and cut.hour * 60 + cut.minute < 930)]
+            for i, f in enumerate(ahead[:2]):              # front + next month (rollover)
+                fut_meta[f["key"]] = {"symbol": sym, "expiry": datetime.fromtimestamp(f["expiry_ms"] / 1000, IST).strftime("%Y-%m-%d"),
+                                      "front": i == 0, "lot": f.get("lot"), "ts": f.get("ts")}
+        reserved = len(ukeys) + len(fut_meta)
         budget = setting("trkBudget")
-        if p.limit >= HARD_CAP:              # all-live provider: reserve room for the underlyings
-            budget = min(budget, p.limit - len(ukeys))
+        if p.limit >= HARD_CAP:              # all-live provider: reserve room for underlyings + futures
+            budget = min(budget, p.limit - reserved)
         sel, edge = self.u.select(spots, budget)
         due = [x for x in edge if time.time() - self._contract_ts.get(x, 0) > 900][:25]
         added = 0
@@ -583,18 +610,18 @@ class StockOptionsTracker:
         if added:
             self.stats["new_strikes_today"] += added
             sel, edge = self.u.select(spots, budget)
-        room = max(0, p.limit - len(ukeys))
+        room = max(0, p.limit - reserved)
         live = set(sel) if len(sel) <= room else set(sorted(sel, key=lambda k: sel[k]["dist"])[:room])
         with self._lock:
             gone = set(self.sel) - set(sel)
-            self.sel, self.live_keys, self.ukeys = sel, live, ukeys
+            self.sel, self.live_keys, self.ukeys, self.fut_meta = sel, live, ukeys, fut_meta
         self.det.forget(gone)
         self.trend.forget(gone)
         for k in gone:
             self.latest.pop(k, None)
             self.greeks.pop(k, None)
             self.ivwin.pop(k, None)
-        d = p.set_subscription(live | set(ukeys))
+        d = p.set_subscription(live | set(ukeys) | set(fut_meta))
         self.stats["last_rebalance"] = now_ist().strftime("%H:%M:%S")
         self.stats["edge_stocks"] = len(edge)
         return {"tracked": len(sel), "live": len(live), **d}
@@ -604,6 +631,20 @@ class StockOptionsTracker:
         """Provider callback (WS thread or REST poll): merge fields, run detectors + trend engine."""
         ts = ts or time.time()
         m = self.sel.get(key)
+        if m is None and key in self.fut_meta:
+            fm = self.fut_meta[key]
+            cur = self.latest.setdefault(key, {})
+            cur.update(f)
+            cur["ts"] = ts
+            self.stats["ticks"] += 1
+            if f.get("oi") is not None:
+                ev = self.det.on_oi(key, f["oi"], ts, fm["lot"])
+                if ev:
+                    ev["symbol"] = fm["symbol"]
+                    self._events.put(ev)
+            if fm["front"]:
+                self._fut_check(fm["symbol"], ts)
+            return
         if m is None:
             sym = self.ukeys.get(key)
             if sym and f.get("ltp"):         # underlying stock tick: live spot + stock trend + ORB
@@ -640,7 +681,7 @@ class StockOptionsTracker:
 
     def poll_rest(self):
         with self._lock:
-            keys = list(self.sel)
+            keys = list(self.sel) + list(self.fut_meta)
         if not keys:
             return
         q = self.p.poll(keys)
@@ -704,6 +745,67 @@ class StockOptionsTracker:
                               "pct": round(ratio, 1), "ts": ts,
                               "reason": f"today's volume {_fmt(vol)} = {ratio:.1f}x yesterday's OI {_fmt(poi)} "
                                         f"(threshold {setting('trkVolOiRatio')}x) — fresh positions, not just churn"})
+
+    # ---------------- stock futures ----------------
+    def fut_row(self, sym):
+        """Front-month futures snapshot for a stock: price, basis, OI change, buildup, rollover."""
+        front = nxt = None
+        for k, fm in self.fut_meta.items():
+            if fm["symbol"] == sym:
+                if fm["front"]:
+                    front = k
+                else:
+                    nxt = k
+        if not front:
+            return None
+        lv = self.latest.get(front, {})
+        ltp, pc, oi, vol = lv.get("ltp"), lv.get("prev_close"), lv.get("oi"), lv.get("volume")
+        poi = self.prev_oi(front, lv)
+        spot = self.spots.get(self.u.stocks.get(sym, {}).get("underlying_key"))
+        noi = self.latest.get(nxt, {}).get("oi") if nxt else None
+        pch = (ltp - pc) / pc * 100 if ltp and pc else None
+        och = (oi - poi) / poi * 100 if oi is not None and poi else None
+        lab = bu_label(pch, och) if pch is not None and och is not None and abs(pch) >= 0.2 and abs(och) >= 0.5 else None
+        return {"symbol": sym, "key": front, "expiry": self.fut_meta[front]["expiry"], "ltp": ltp, "prev_close": pc,
+                "chg_pct": round(pch, 2) if pch is not None else None, "spot": spot,
+                "basis": round(ltp - spot, 2) if ltp and spot else None,
+                "basis_pct": round((ltp - spot) / spot * 100, 2) if ltp and spot else None,
+                "oi": oi, "prev_oi": poi, "oi_chg": (oi - poi) if oi is not None and poi else None,
+                "oi_chg_pct": round(och, 2) if och is not None else None, "buildup": lab,
+                "volume": vol, "vwap": lv.get("vwap"), "high": lv.get("high"), "low": lv.get("low"),
+                "next_oi": noi, "rollover_pct": round(noi / (noi + oi) * 100, 1) if noi and oi else None}
+
+    def _fut_check(self, sym, ts):
+        r = self.fut_row(sym)
+        if not r or r["chg_pct"] is None:
+            return
+        st = self._sig(sym, ts)
+        # buildup: strong price + OI move, once per day per label
+        if (r["oi_chg_pct"] is not None and abs(r["chg_pct"]) >= setting("trkFutPricePct")
+                and abs(r["oi_chg_pct"]) >= setting("trkFutOiPct")):
+            lab = bu_label(r["chg_pct"], r["oi_chg_pct"])
+            if lab and self._once_today(("FUT", sym, lab)):
+                btxt = "" if r["basis_pct"] is None else f", basis {r['basis_pct']:+.2f}%"
+                self._events.put({"kind": "FUT_BUILDUP", "dir": "UP" if lab in ("LB", "SC") else "DOWN", "key": r["key"],
+                                  "symbol": sym, "from": r["prev_oi"], "to": r["oi"], "pct": r["oi_chg_pct"], "ts": ts,
+                                  "reason": f"{sym} FUTURES {LABELS[lab].upper()}: price {_fmt(r['prev_close'])} → {_fmt(r['ltp'])} "
+                                            f"({r['chg_pct']:+.2f}%), OI {_fmt(r['prev_oi'])} → {_fmt(r['oi'])} ({r['oi_chg_pct']:+.1f}%)"
+                                            f"{btxt}"})
+        # basis flip premium <-> discount
+        b = r["basis_pct"]
+        if b is not None and abs(b) >= setting("trkBasisMinPct"):
+            side = "PREMIUM" if b > 0 else "DISCOUNT"
+            prev = st.get("basis_side")
+            st["basis_side"] = side
+            if prev and prev != side and self._once_today(("BASIS", sym, side)):
+                self._events.put({"kind": "BASIS", "dir": "UP" if side == "PREMIUM" else "DOWN", "key": r["key"], "symbol": sym,
+                                  "from": None, "to": r["basis"], "pct": b, "ts": ts,
+                                  "reason": f"{sym} futures flipped from {prev.lower()} to {side.lower()}: futures {_fmt(r['ltp'])} vs "
+                                            f"spot {_fmt(r['spot'])} = {r['basis']:+.2f} ({b:+.2f}%) — "
+                                            f"{'longs willing to pay up' if side == 'PREMIUM' else 'shorts pressing / carry negative'}"})
+
+    def futures(self):
+        return [r for r in (self.fut_row(sym) for sym in sorted(self.u.stocks)) if r]
 
     # ---------------- stock-level signals ----------------
     def _sig(self, sym, ts):
@@ -943,11 +1045,13 @@ class StockOptionsTracker:
 
     def handle_event(self, ev):
         m = self.sel.get(ev["key"]) or {}
-        sym = ev.get("symbol") or m.get("symbol") or self.ukeys.get(ev["key"], "?")
+        fm = self.fut_meta.get(ev["key"])
+        sym = (ev.get("symbol") or m.get("symbol") or (fm or {}).get("symbol")
+               or self.ukeys.get(ev["key"], "?"))
         lv = self.latest.get(ev["key"], {})
         gk = self.greeks.get(ev["key"], {})
         reason = self._reason(ev, m)
-        leg = {"key": ev["key"], "strike": m.get("strike"), "opt": m.get("opt") or ("STOCK" if not m else None),
+        leg = {"key": ev["key"], "strike": m.get("strike"), "opt": m.get("opt") or ("FUT" if fm else "STOCK"),
                "from": ev["from"], "to": ev["to"], "pct": ev["pct"], "ltp": lv.get("ltp"), "vwap": lv.get("vwap"),
                "oi": lv.get("oi"), "volume": lv.get("volume"), "iv": gk.get("iv"), "reason": reason,
                "trend_id": ev.get("trend_id"), "time": datetime.fromtimestamp(ev["ts"], IST).strftime("%H:%M:%S")}
@@ -968,7 +1072,7 @@ class StockOptionsTracker:
         a = {"id": self._alert_seq, "symbol": sym, "name": s.get("name", sym), "kind": ev["kind"],
              "dir": ev["dir"], "ts": ev["ts"],
              "time": datetime.fromtimestamp(ev["ts"], IST).strftime("%Y-%m-%d %H:%M:%S"),
-             "spot": m.get("spot") or self.spots.get(s.get("underlying_key")), "expiry": m.get("expiry"),
+             "spot": m.get("spot") or self.spots.get(s.get("underlying_key")), "expiry": m.get("expiry") or (fm or {}).get("expiry"),
              "max_pct": abs(ev["pct"] or 0), "legs": [leg], "reason": reason,
              "first_alert": first or {"time": datetime.fromtimestamp(ev["ts"], IST).strftime("%H:%M:%S"),
                                       "kind": ev["kind"], "reason": reason},
@@ -1165,6 +1269,10 @@ class StockOptionsTracker:
             st = self.trend.running(self.u.stocks.get(a["symbol"], {}).get("underlying_key"))
             a["stock_trend"] = {"dir": st["dir"], "since": st["started_time"], "move_pct": st["move_pct"]} if st else None
             a.update(self.ctx.info(a["symbol"]) if self.ctx else {})
+            fr = self.fut_row(a["symbol"])
+            if fr:
+                a.update({"fut_ltp": fr["ltp"], "fut_basis_pct": fr["basis_pct"], "fut_oi_chg_pct": fr["oi_chg_pct"],
+                          "fut_buildup": fr["buildup"], "rollover_pct": fr["rollover_pct"]})
             out.append(a)
         out.sort(key=lambda a: -(a["ce_vol"] + a["pe_vol"]))
         return out
@@ -1187,6 +1295,7 @@ class StockOptionsTracker:
                 "dhan_error": getattr(self.providers.get("dhan"), "fatal", None),
                 "stocks_in_master": len(self.u.stocks), "stocks_tracked": len(per),
                 "instruments_tracked": n, "instruments_live": nl, "underlyings_live": len(self.ukeys),
+                "futures_live": len(self.fut_meta),
                 "budget": min(int(setting("trkBudget")), HARD_CAP),
                 "per_stock": (min(per.values()), max(per.values())) if per else (0, 0),
                 "alerts_today": sum(1 for a in self.alerts if a["time"][:10] == today),

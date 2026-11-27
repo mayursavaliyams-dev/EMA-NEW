@@ -68,6 +68,10 @@ class FakeProvider:
     def load_rows(self):
         return rows()
 
+    def load_futures(self):
+        return [{"symbol": f"STK{i}", "underlying_key": f"NSE_EQ|{1000 + i}", "lot": 500, "expiry_ms": exp_ms(d),
+                 "key": f"NSE_FNO|FUT{i}-{d}", "ts": f"STK{i} FUT"} for i in range(218) for d in (5, 35, 65)]
+
     def spots(self, keys):
         return {k: self.spot for k in keys}
 
@@ -114,6 +118,7 @@ def make(provider=None, history=False, context=False):
     t.alerts.clear()
     t.choose_provider()
     t.u.build(p.load_rows())
+    t.u.build_futures(p.load_futures())
     return t, p, n
 
 
@@ -126,8 +131,9 @@ def test_25000_allocation():
         per[m["symbol"]] = per.get(m["symbol"], 0) + 1
     check("218 stocks covered", len(per) == 218, f"({len(per)})")
     check("25,000 strikes tracked", len(t.sel) == 25000, f"({len(t.sel)})")
-    check("Upstox: 4,782 nearest-ATM strikes + 218 stocks = 5,000 streamed live",
-          len(t.live_keys) == 4782 and p.sub == t.live_keys | set(t.ukeys) and len(p.sub) == 5000)
+    check("Upstox: 4,346 nearest-ATM strikes + 218 stocks + 436 futures = 5,000 streamed live",
+          len(t.live_keys) == 4346 and len(t.fut_meta) == 436 and p.sub == t.live_keys | set(t.ukeys) | set(t.fut_meta)
+          and len(p.sub) == 5000)
     far = max(t.sel[k]["dist"] for k in t.live_keys)
     check("live subset = nearest strikes", all(t.sel[k]["dist"] >= far - 1e-12 for k in set(t.sel) - t.live_keys))
     check("front expiry only", {m["expiry"] for m in t.sel.values()} == {(datetime.now(IST) + timedelta(days=5)).strftime("%Y-%m-%d")})
@@ -135,7 +141,8 @@ def test_25000_allocation():
     check("window centred on ATM", strikes[0] <= 1300 <= strikes[-1], f"({strikes[0]}..{strikes[-1]})")
     t2, p2, _ = make(FakeProvider("dhan", 25000))
     t2.rebalance()
-    check("Dhan: every tracked strike + 218 stocks live = 25,000", len(t2.live_keys) == len(t2.sel) == 24782 and len(p2.sub) == 25000)
+    check("Dhan: every tracked strike + 218 stocks + 436 futures live = 25,000",
+          len(t2.live_keys) == len(t2.sel) == 24346 and len(p2.sub) == 25000)
     # broker lists fewer front-expiry strikes than the budget (Upstox ~12.6k) -> next expiry fills
     p3 = FakeProvider()
     p3.load_rows = lambda: rows(strikes=30)          # 218 x 30 x 2 = 13,080 legs per expiry
@@ -445,9 +452,10 @@ def test_history():
     ds = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in (6, 5, 4, 3, 2, 1)]
     days = []
     for i, d in enumerate(ds):         # CE: price up + OI up every day (long buildup), PE: price down + OI up (short buildup)
-        days.append((d, [("101", "ABC", exp, 100, "CE", 10 + i * 2, 8 + i, 9 + i * 2, 8 + i * 2, 1000 + i * 500, 500, 50, 1000 + i),
+        days.append((d, [("901", "ABC", exp, 0, "FUT", 0, 0, 1010 + i * 5, 1005 + i * 5, 9000 + i * 1000, 1000, 70, 1000 + i),
+                         ("101", "ABC", exp, 100, "CE", 10 + i * 2, 8 + i, 9 + i * 2, 8 + i * 2, 1000 + i * 500, 500, 50, 1000 + i),
                          ("102", "ABC", exp, 100, "PE", 20 - i, 15 - i, 16 - i, 17 - i, 2000 + i * 300, 300, 40, 1000 + i)]))
-    days[2][1][0] = ("101", "ABC", exp, 100, "CE", 99, 8, 9 + 4, 8 + 4, 2000, 500, 50, 1002)      # the all-time high day
+    days[2][1][1] = ("101", "ABC", exp, 100, "CE", 99, 8, 9 + 4, 8 + 4, 2000, 500, 50, 1002)      # the all-time high day
     h = History(days=30, cache=fake_hist(days), fetch=False).load(today)
     c = h.contract("101")
     check("ALL-TIME HIGH + date from bhavcopy", c["ath"] == 99 and c["ath_d"] == ds[2])
@@ -457,6 +465,8 @@ def test_history():
     check("multi-day: CE OI up 6 days in a row", row["ce_streak"] == 6)
     check("persistent activity: CE long buildup / PE short buildup every day",
           row["ce_run"] == "LB" and row["ce_run_days"] == 6 and row["pe_run"] == "SB" and row["pe_dom_days"] == 5)
+    check("futures history: OI streak, long buildup every day, basis %",
+          row["fut_streak"] == 6 and row["fut_run"] == "LB" and row["fut_run_days"] == 6 and row["fut_basis_pct"] is not None)
     sb = h.strike_build("ABC", 5)
     check("strikes where OI was built over 5 days", sb[0]["oi_chg"] == 2500 and sb[0]["opt"] == "CE")
     return h
@@ -603,12 +613,37 @@ def test_stock_signals():
     check("opening-range breakout (stock)", orb and orb[0]["dir"] == "UP" and "1,305" in orb[0]["reason"])
 
 
+def test_futures():
+    t, p, n = make()
+    t.rebalance()
+    fm = {m["symbol"] + ("F" if m["front"] else "N"): k for k, m in t.fut_meta.items()}
+    check("front + next month futures per stock", len(t.fut_meta) == 436 and "STK9F" in fm and "STK9N" in fm)
+    uk = t.u.stocks["STK9"]["underlying_key"]
+    now = time.time()
+    t.on_data(uk, {"ltp": 1000.0}, now)
+    t.on_data(fm["STK9N"], {"oi": 300000}, now)
+    t.on_data(fm["STK9F"], {"ltp": 1005.0, "prev_close": 990.0, "oi": 1100000, "prev_oi": 1000000, "volume": 5000}, now)
+    r = t.fut_row("STK9")
+    check("futures row: basis, OI chg, long buildup, rollover",
+          r["basis"] == 5.0 and r["basis_pct"] == 0.5 and r["oi_chg_pct"] == 10.0 and r["buildup"] == "LB"
+          and r["rollover_pct"] == 21.4, str(r))
+    t.on_data(uk, {"ltp": 1010.0}, now + 1)
+    t.on_data(fm["STK9F"], {"ltp": 1004.0}, now + 2)           # futures now BELOW spot -> discount
+    t._drain_events()
+    k = {a["kind"]: a for a in t.alerts if a["symbol"] == "STK9"}
+    check("FUT_BUILDUP alert with reason", "FUT_BUILDUP" in k and "LONG BUILDUP" in k["FUT_BUILDUP"]["reason"])
+    check("BASIS flip alert (premium -> discount)", "BASIS" in k and "to discount" in k["BASIS"]["reason"])
+    s9 = [x for x in t.summary() if x["symbol"] == "STK9"][0]
+    check("summary carries futures basis / buildup / rollover", s9["fut_buildup"] == "LB" and s9["rollover_pct"] == 21.4)
+    check("futures list endpoint data", any(x["symbol"] == "STK9" for x in t.futures()))
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

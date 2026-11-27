@@ -591,9 +591,9 @@ const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan/ups
   trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
   trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkVolOiRatio:'Unusual: Vol/OI ×',
   trkIvSpikePts:'IV spike (pts)',trkIvWindowMin:'IV window (min)',trkTrendBarMin:'Trend candle (min)',trkTrendMinBars:'Trend warm-up candles',trkTrendGreen:'Trend: candles in a row',
-  trkTrendMinPct:'Trend min move % (option)',trkTrendMinPctStock:'Trend min move % (stock)',trkMwplAlertPct:'MWPL alert %',trkPcrShift:'PCR shift alert',trkStraddlePct:'Straddle expansion %',trkOrbMin:'Opening range (min)',trkAtlAlerts:'All-time LOW alerts',trkAthMaxDistPct:'ATH alert: max dist % from spot',trkHistDays:'History days',
+  trkTrendMinPct:'Trend min move % (option)',trkTrendMinPctStock:'Trend min move % (stock)',trkMwplAlertPct:'MWPL alert %',trkFutPricePct:'Futures buildup: price %',trkFutOiPct:'Futures buildup: OI %',trkBasisMinPct:'Basis flip min %',trkPcrShift:'PCR shift alert',trkStraddlePct:'Straddle expansion %',trkOrbMin:'Opening range (min)',trkAtlAlerts:'All-time LOW alerts',trkAthMaxDistPct:'ATH alert: max dist % from spot',trkHistDays:'History days',
   trkCooldownMin:'Cooldown (min)',trkNewsLookbackMin:'News before (min)',trkNewsAfterMin:'News after (min)',trkRebalanceMin:'Re-centre ATM (min)',trkQuotePollSec:'REST poll (sec)',trkAlwaysOn:'Run off-hours'};
-const KIND={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst',UNUSUAL:'Unusual Vol/OI',IV:'IV',ATH:'All-time HIGH',ATL:'All-time LOW',TREND:'Trend START',TREND_END:'Trend END',BAN:'F&O BAN',MWPL:'MWPL',OI_SHIFT:'OI wall shift',PCR:'PCR shift',STRADDLE:'Straddle expansion',ORB:'Opening-range breakout'};
+const KIND={PRICE:'Premium',OI:'OI',VOLUME:'Volume burst',UNUSUAL:'Unusual Vol/OI',IV:'IV',ATH:'All-time HIGH',ATL:'All-time LOW',TREND:'Trend START',TREND_END:'Trend END',BAN:'F&O BAN',MWPL:'MWPL',OI_SHIFT:'OI wall shift',FUT_BUILDUP:'Futures buildup',BASIS:'Futures basis flip',PCR:'PCR shift',STRADDLE:'Straddle expansion',ORB:'Opening-range breakout'};
 const flt=(id,items,cur,fn)=>{$(id).innerHTML=items.map(([v,l])=>`<button data-v="${v}" class="${v===cur?'on':''}">${l}</button>`).join(' ');
   $(id).querySelectorAll('button').forEach(b=>b.onclick=()=>{$(id).querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));fn(b.dataset.v);});};
 flt('trk-flt',[['','All'],['NEWS-MATCH','News match'],['UNEXPLAINED','Unexplained'],['NEWS-AFTER','News after'],['INFO','Context']],'',v=>{TRK_FLT=v;renderTracker();});
@@ -621,7 +621,8 @@ const ctxBadges=r=>(r.ban?'<span class="ctx" title="F&O ban — no fresh positio
 function renderSummary(){
   const f=($('trk-find').value||'').toUpperCase();
   const cols=[['symbol','Stock'],['spot','Spot'],['stock_trend','Trend'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['ce_buildup','CE act.'],
-    ['pe_oi_chg','PE OI chg'],['pe_buildup','PE act.'],['vol','Volume'],['atm_iv','ATM IV'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],
+    ['pe_oi_chg','PE OI chg'],['pe_buildup','PE act.'],['fut_basis_pct','Fut basis %'],['fut_oi_chg_pct','Fut OI chg %'],['fut_buildup','Fut act.'],['rollover_pct','Rollover %'],
+    ['vol','Volume'],['atm_iv','ATM IV'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],
     ['mwpl_pct','MWPL %'],['alerts','Alerts'],['trends','Trends']];
   const rows=TRK_SUM.filter(r=>!f||r.symbol.includes(f)).map(r=>({...r,vol:r.ce_vol+r.pe_vol}));
   const val=(r,k)=>k==='stock_trend'?(r.stock_trend?(r.stock_trend.dir==='UP'?1:-1)*Math.abs(r.stock_trend.move_pct||0):null):r[k];
@@ -630,6 +631,7 @@ function renderSummary(){
     rows.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b> ${ctxBadges(r)}</td><td>${nf(r.spot)}</td>
       <td>${r.stock_trend?`<span class="${r.stock_trend.dir==='UP'?'up':'down'}" title="since ${esc(r.stock_trend.since)}">${r.stock_trend.dir==='UP'?'▲':'▼'} ${r.stock_trend.since}</span>`:'--'}</td>
       <td class="ce">${nf(r.ce_oi)}</td><td class="pe">${nf(r.pe_oi)}</td><td>${r.pcr??'--'}</td><td>${sg(r.ce_oi_chg)}</td><td>${bu(r.ce_buildup)}</td><td>${sg(r.pe_oi_chg)}</td><td>${bu(r.pe_buildup)}</td>
+      <td>${pc(r.fut_basis_pct)}</td><td>${pc(r.fut_oi_chg_pct)}</td><td>${bu(r.fut_buildup)}</td><td>${r.rollover_pct??'--'}</td>
       <td>${nf(r.vol)}</td><td>${r.atm_iv??'--'}</td><td class="pe">${r.resistance??'--'}</td><td class="ce">${r.support??'--'}</td>
       <td>${esc(r.max_vol_strike??'--')}</td><td>${r.mwpl_pct??'--'}</td><td>${r.alerts?`<b style="color:var(--warn)">${r.alerts}</b>`:0}</td><td>${r.trends||0}</td></tr>`).join('')+'</tbody>';
 }
@@ -649,7 +651,9 @@ async function renderLadder(){
   $('trk-exp').innerHTML=ex.map(e=>`<option ${e===TRK_EXP?'selected':''}>${e}</option>`).join('');
   const rows=d.rows||[]; const by={}; rows.forEach(r=>{(by[r.strike]=by[r.strike]||{})[r.opt]=r;});
   const atm=rows[0]?.atm, spot=rows[0]?.spot;
-  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'} <span class="hl-badge">hover a price → IV/greeks/bid-ask/history · click → chart · ● live · H/L at day high/low · ★ near all-time high · ↗↘ trend running</span>`;
+  const fr=(TRK_SUM.find(x=>x.symbol===TRK_SYM)||{});
+  const futTxt=fr.fut_ltp!=null?` · FUT ${nf(fr.fut_ltp)} (basis ${fr.fut_basis_pct>0?'+':''}${fr.fut_basis_pct??'--'}%, OI ${fr.fut_oi_chg_pct>0?'+':''}${fr.fut_oi_chg_pct??'--'}% ${bu(fr.fut_buildup)}, rollover ${fr.rollover_pct??'--'}%)`:'';
+  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'}${futTxt} <span class="hl-badge">hover a price → IV/greeks/bid-ask/history · click → chart · ● live · H/L at day high/low · ★ near all-time high · ↗↘ trend running</span>`;
   const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="10">--</td>';
     const vw=r.vwap!=null?`<span class="${r.above_vwap?'vw-up':'vw-dn'}">${r.vwap}</span>`:'--';
     const hl=r.range_pos==null?'':r.range_pos>=98?' <b class="up" title="at day high">H</b>':r.range_pos<=2?' <b class="down" title="at day low">L</b>':'';
@@ -670,9 +674,10 @@ async function renderStockHist(){
   const d=await j('/api/tracker/history/stock?symbol='+encodeURIComponent(TRK_SYM)+'&days=30&n='+TRK_HWIN);
   const days=(d.days||[]).slice().reverse();
   $('trk-sd-title').innerHTML=`🗓️ ${esc(TRK_SYM)} — day-by-day record (NSE bhavcopy, ${days.length} days) · <span class="hl-badge">Act. = biggest OI activity that day</span>`;
-  $('trk-sdays').innerHTML=`<thead><tr><th>Date</th><th>Stock</th><th>CE OI</th><th>CE OI chg</th><th>CE act.</th><th>PE OI</th><th>PE OI chg</th><th>PE act.</th><th>PCR</th></tr></thead><tbody>`+
+  $('trk-sdays').innerHTML=`<thead><tr><th>Date</th><th>Stock</th><th>CE OI</th><th>CE OI chg</th><th>CE act.</th><th>PE OI</th><th>PE OI chg</th><th>PE act.</th><th>PCR</th><th>FUT</th><th>FUT OI chg</th><th>FUT act.</th><th>Basis %</th><th>Rollover %</th></tr></thead><tbody>`+
     (days.length?days.map(x=>`<tr><td>${esc(x.date)}</td><td>${nf(x.undl)}</td><td class="ce">${nf(x.ce_oi)}</td><td>${sg(x.ce_choi)}</td><td>${bu(x.ce_day)}</td>
-      <td class="pe">${nf(x.pe_oi)}</td><td>${sg(x.pe_choi)}</td><td>${bu(x.pe_day)}</td><td>${x.pcr??'--'}</td></tr>`).join(''):'<tr><td colspan="9" class="hl-badge">history loading / not available</td></tr>')+'</tbody>';
+      <td class="pe">${nf(x.pe_oi)}</td><td>${sg(x.pe_choi)}</td><td>${bu(x.pe_day)}</td><td>${x.pcr??'--'}</td>
+      <td>${x.fut_close??'--'}</td><td>${sg(x.fut_choi)}</td><td>${bu(x.fut_day)}</td><td>${pc(x.fut_basis_pct)}</td><td>${x.rollover_pct??'--'}</td></tr>`).join(''):'<tr><td colspan="14" class="hl-badge">history loading / not available</td></tr>')+'</tbody>';
   const sb=d.strikes||[];
   $('trk-sbuild').innerHTML=`<thead><tr><th>Strike</th><th>Exp</th><th>OI</th><th>OI built ${TRK_HWIN}d</th><th>Streak</th><th>Last days</th><th>ATL/ATH</th></tr></thead><tbody>`+
     sb.map(x=>`<tr><td class="${x.opt==='CE'?'ce':'pe'}">${x.strike}${x.opt}</td><td>${esc(x.exp.slice(5))}</td><td>${nf(x.oi)}</td><td>${sg(x.oi_chg)}</td><td>${streak(x.oi_streak)}</td>
@@ -698,17 +703,20 @@ async function renderHistory(){
   const d=await j('/api/tracker/history?window='+TRK_HWIN); TRK_HIST=d.stocks||[];
   $('trk-hist-st').textContent=d.status||'';
   $('trk-hist').innerHTML=`<thead><tr><th>Stock</th><th>Stock ${TRK_HWIN}d</th><th>CE OI</th><th>CE OI ${TRK_HWIN===20?20:5}d</th><th>CE OI 20d</th><th>CE streak</th><th>CE same activity</th><th>CE most days (${TRK_HWIN}d)</th>
-    <th>PE OI</th><th>PE OI 5d</th><th>PE OI 20d</th><th>PE streak</th><th>PE same activity</th><th>PE most days (${TRK_HWIN}d)</th><th>PCR</th></tr></thead><tbody>`+
+    <th>PE OI</th><th>PE OI 5d</th><th>PE OI 20d</th><th>PE streak</th><th>PE same activity</th><th>PE most days (${TRK_HWIN}d)</th><th>PCR</th>
+    <th>FUT OI</th><th>FUT OI 5d</th><th>FUT OI 20d</th><th>FUT streak</th><th>FUT same activity</th><th>FUT most days</th><th>Basis %</th><th>Rollover %</th></tr></thead><tbody>`+
     TRK_HIST.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b></td><td>${pc(r.undl_chg_pct)}</td>
       <td class="ce">${nf(r.ce_oi)}</td><td>${pc(r.ce_oi_5d)}</td><td>${pc(r.ce_oi_20d)}</td><td>${streak(r.ce_streak)}</td><td>${bu(r.ce_run)} ${r.ce_run_days}d</td><td>${bu(r.ce_dom)} ${r.ce_dom_days}/${r.window}</td>
-      <td class="pe">${nf(r.pe_oi)}</td><td>${pc(r.pe_oi_5d)}</td><td>${pc(r.pe_oi_20d)}</td><td>${streak(r.pe_streak)}</td><td>${bu(r.pe_run)} ${r.pe_run_days}d</td><td>${bu(r.pe_dom)} ${r.pe_dom_days}/${r.window}</td><td>${r.pcr??'--'}</td></tr>`).join('')+'</tbody>';
+      <td class="pe">${nf(r.pe_oi)}</td><td>${pc(r.pe_oi_5d)}</td><td>${pc(r.pe_oi_20d)}</td><td>${streak(r.pe_streak)}</td><td>${bu(r.pe_run)} ${r.pe_run_days}d</td><td>${bu(r.pe_dom)} ${r.pe_dom_days}/${r.window}</td><td>${r.pcr??'--'}</td>
+      <td>${nf(r.fut_oi)}</td><td>${pc(r.fut_oi_5d)}</td><td>${pc(r.fut_oi_20d)}</td><td>${streak(r.fut_streak)}</td><td>${bu(r.fut_run)} ${r.fut_run_days??0}d</td>
+      <td>${bu(r.fut_dom)} ${r.fut_dom_days??0}/${r.window}</td><td>${pc(r.fut_basis_pct)}</td><td>${r.rollover_pct??'--'}</td></tr>`).join('')+'</tbody>';
 }
 async function renderTracker(){
   const st=await j('/api/tracker/status');
   const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
     ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
-    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks · `+esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
+    ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks +${st.futures_live||0} futures · `+esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
     ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
     ['Trends', `${st.trends_running||0} running`, `${st.trends_today||0} today · IV/greeks on ${nf(st.greeks)} strikes`],
     ['Alerts today', st.alerts_today, `re-centred ${st.last_rebalance||'--'} · new strikes ${st.new_strikes_today}`],
@@ -719,7 +727,7 @@ async function renderTracker(){
 
   const al=(await j('/api/tracker/alerts?limit=150'+(TRK_FLT?'&status='+TRK_FLT:''))).alerts||[];
   $('trk-alerts').innerHTML=al.length?al.map(a=>{
-    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
+    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.opt==='FUT'?'futures':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
     const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
     const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
     return `<div class="trk-alert ${esc(a.status)}">

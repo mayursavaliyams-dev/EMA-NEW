@@ -29,7 +29,7 @@ import httpx
 import config
 
 IST = timezone(timedelta(hours=5, minutes=30))
-CACHE = os.path.join(config.DATA, "bhav_slim")
+CACHE = os.path.join(config.DATA, "bhav_slim2")      # v2: stock options + stock futures
 URL = "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{ymd}_F_0000.csv.zip"
 FIELDS = ["tok", "sym", "exp", "strike", "opt", "open", "high", "low", "close", "prev", "oi", "choi", "vol", "undl"]
 LABELS = {"LB": "Long buildup", "SB": "Short buildup", "SC": "Short covering", "LU": "Long unwinding"}
@@ -89,9 +89,11 @@ class History:
                 w = csv.writer(f)
                 w.writerow(FIELDS)
                 for x in csv.DictReader(raw):
-                    if x.get("FinInstrmTp") != "STO":
+                    tp = x.get("FinInstrmTp")
+                    if tp not in ("STO", "STF"):
                         continue
-                    w.writerow([x["FinInstrmId"], x["TckrSymb"], x["XpryDt"], x["StrkPric"], x["OptnTp"],
+                    w.writerow([x["FinInstrmId"], x["TckrSymb"], x["XpryDt"], x["StrkPric"] or "0",
+                                x["OptnTp"] if tp == "STO" else "FUT",
                                 x["OpnPric"], x["HghPric"], x["LwPric"], x["ClsPric"], x["PrvsClsgPric"],
                                 x["OpnIntrst"], x["ChngInOpnIntrst"], x["TtlTradgVol"], x["UndrlygPric"]])
             os.replace(tmp, path)
@@ -130,7 +132,7 @@ class History:
         for fn in files:
             date = f"{fn[:4]}-{fn[4:6]}-{fn[6:8]}"
             dates.append(date)
-            agg = {}
+            agg, futd = {}, {}
             with gzip.open(os.path.join(self.cache, fn), "rt", encoding="utf-8", newline="") as f:
                 for x in csv.DictReader(f):
                     tok, sym = x["tok"], x["sym"]
@@ -156,6 +158,9 @@ class History:
                     if len(c["lab_hist"]) > 10:
                         del c["lab_hist"][0]
                     c["last_d"], c["last_oi"], c["last_close"] = date, oi, cl
+                    if x["opt"] == "FUT":
+                        futd.setdefault(sym, []).append((x["exp"], oi, choi, cl, pv, vol, _f(x["undl"])))
+                        continue
                     a = agg.get(sym)
                     if a is None:
                         a = agg[sym] = {"date": date, "undl": _f(x["undl"]), "ce_oi": 0, "pe_oi": 0, "ce_choi": 0,
@@ -168,6 +173,17 @@ class History:
                     a[side + "_vol"] += vol
                     if lab:
                         a[side + "_lab"][lab] += abs(choi)
+            for sym, fl in futd.items():
+                a = agg.get(sym)
+                if a is None:
+                    continue
+                fl.sort()
+                front = fl[0]                                   # nearest expiry = front month
+                tot = sum(v[1] for v in fl)
+                a.update({"fut_oi": tot, "fut_choi": sum(v[2] for v in fl), "fut_close": front[3],
+                          "fut_basis_pct": round((front[3] - front[6]) / front[6] * 100, 2) if front[6] else None,
+                          "fut_day": label(front[3] - front[4], front[2]) if front[5] or front[2] else None,
+                          "rollover_pct": round((tot - front[1]) / tot * 100, 1) if tot else None})
             for sym, a in agg.items():
                 a["ce_day"] = max(a["ce_lab"], key=a["ce_lab"].get) if any(a["ce_lab"].values()) else None
                 a["pe_day"] = max(a["pe_lab"], key=a["pe_lab"].get) if any(a["pe_lab"].values()) else None
@@ -239,8 +255,9 @@ class History:
             def chg(side, n):
                 if len(days) <= n:
                     return None
-                base = days[-1 - n][side + "_oi"]
-                return round((last[side + "_oi"] - base) / base * 100, 1) if base else None
+                base = days[-1 - n].get(side + "_oi")
+                cur = last.get(side + "_oi")
+                return round((cur - base) / base * 100, 1) if base and cur is not None else None
 
             ce_labs = [d["ce_day"] for d in days]
             pe_labs = [d["pe_day"] for d in days]
@@ -248,6 +265,9 @@ class History:
             recent = days[-window:]
             ce_cnt = {k: sum(1 for d in recent if d["ce_day"] == k) for k in LABELS}
             pe_cnt = {k: sum(1 for d in recent if d["pe_day"] == k) for k in LABELS}
+            fut_run = self._run([d.get("fut_day") for d in days])
+            fut_cnt = {k: sum(1 for d in recent if d.get("fut_day") == k) for k in LABELS}
+            fut_dom = max(fut_cnt, key=fut_cnt.get) if any(fut_cnt.values()) else None
             ce_dom = max(ce_cnt, key=ce_cnt.get) if any(ce_cnt.values()) else None
             pe_dom = max(pe_cnt, key=pe_cnt.get) if any(pe_cnt.values()) else None
             u0 = days[-1 - window]["undl"] if len(days) > window else days[0]["undl"]
@@ -259,6 +279,11 @@ class History:
                         "ce_streak": self._streak([d["ce_choi"] for d in days]),
                         "pe_streak": self._streak([d["pe_choi"] for d in days]),
                         "ce_run": ce_run[0], "ce_run_days": ce_run[1], "pe_run": pe_run[0], "pe_run_days": pe_run[1],
+                        "fut_oi": last.get("fut_oi"), "fut_oi_5d": chg("fut", 5), "fut_oi_20d": chg("fut", 20),
+                        "fut_streak": self._streak([d.get("fut_choi") or 0 for d in days]),
+                        "fut_run": fut_run[0], "fut_run_days": fut_run[1],
+                        "fut_dom": fut_dom, "fut_dom_days": fut_cnt.get(fut_dom, 0) if fut_dom else 0,
+                        "fut_basis_pct": last.get("fut_basis_pct"), "rollover_pct": last.get("rollover_pct"),
                         "ce_dom": ce_dom, "ce_dom_days": ce_cnt.get(ce_dom, 0) if ce_dom else 0,
                         "pe_dom": pe_dom, "pe_dom_days": pe_cnt.get(pe_dom, 0) if pe_dom else 0,
                         "window": window})
@@ -270,7 +295,7 @@ class History:
         sym = sym.upper()
         rows = []
         for tok, c in self.contracts.items():
-            if c["sym"] != sym or (expiry and c["exp"] != expiry):
+            if c["sym"] != sym or c["opt"] == "FUT" or (expiry and c["exp"] != expiry):
                 continue
             oh = c["oi_hist"]
             if len(oh) < 2:

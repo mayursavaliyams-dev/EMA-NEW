@@ -182,7 +182,7 @@ class DhanProvider:
         path = path or self.MASTER_PATH
         if path == self.MASTER_PATH:
             _download(self.MASTER_URL, path, max_age=3 * 3600)
-        names, rows = {}, []
+        names, rows, futs = {}, [], []
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for r in csv.DictReader(f):
                 if r.get("EXCH_ID") != "NSE":
@@ -190,6 +190,14 @@ class DhanProvider:
                 inst = r.get("INSTRUMENT")
                 if inst == "EQUITY":
                     names[r["SECURITY_ID"]] = r.get("SYMBOL_NAME") or r.get("DISPLAY_NAME")
+                elif inst == "FUTSTK":
+                    try:
+                        futs.append({"symbol": r["UNDERLYING_SYMBOL"], "underlying_key": "NSE_EQ|" + r["UNDERLYING_SECURITY_ID"],
+                                     "lot": int(float(r.get("LOT_SIZE") or 0)) or None,
+                                     "expiry_ms": _exp_ms(r["SM_EXPIRY_DATE"]), "key": "NSE_FNO|" + r["SECURITY_ID"],
+                                     "ts": r.get("DISPLAY_NAME")})
+                    except (KeyError, ValueError):
+                        continue
                 elif inst == "OPTSTK" and r.get("OPTION_TYPE") in ("CE", "PE"):
                     try:
                         rows.append({"symbol": r["UNDERLYING_SYMBOL"],
@@ -203,7 +211,14 @@ class DhanProvider:
                         continue
         for x in rows:
             x["name"] = names.get(x.pop("_uid")) or x["symbol"]
+        self.fut_rows = futs
         return rows
+
+    def load_futures(self):
+        """Stock futures rows {symbol, underlying_key, key, expiry_ms, lot, ts} (from the last master read)."""
+        if getattr(self, "fut_rows", None) is None:
+            self.load_rows()
+        return self.fut_rows
 
     # ---------------- REST ----------------
     def spots(self, underlying_keys):
@@ -424,6 +439,10 @@ class UpstoxProvider:
                 raw = json.load(f)
         names = {r["instrument_key"]: r.get("name") for r in raw if r.get("segment") == "NSE_EQ"}
         rows = []
+        self.fut_rows = [{"symbol": r["underlying_symbol"], "underlying_key": r["underlying_key"], "lot": r.get("lot_size"),
+                          "expiry_ms": int(r.get("expiry") or 0), "key": r["instrument_key"], "ts": r.get("trading_symbol")}
+                         for r in raw if r.get("segment") == "NSE_FO" and r.get("instrument_type") == "FUT"
+                         and r.get("underlying_type") == "EQUITY"]
         for r in raw:
             if (r.get("segment") != "NSE_FO" or r.get("instrument_type") not in ("CE", "PE")
                     or r.get("underlying_type") != "EQUITY"):
@@ -434,6 +453,11 @@ class UpstoxProvider:
                          "strike": float(r["strike_price"]), "opt": r["instrument_type"],
                          "key": r["instrument_key"], "ts": r.get("trading_symbol")})
         return rows
+
+    def load_futures(self):
+        if getattr(self, "fut_rows", None) is None:
+            self.load_rows()
+        return self.fut_rows
 
     def spots(self, underlying_keys):
         keys, out = list(underlying_keys), {}

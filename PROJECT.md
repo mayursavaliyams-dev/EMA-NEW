@@ -115,6 +115,10 @@ never feeds the strangle engine.
   slim gzip cache in `data/bhav_slim/`. Per stock: CE/PE OI 5d/20d change, consecutive OI-up days,
   the same activity repeated day after day; per strike: OI built over N days; per contract: ATH/ATL
   with dates. Also supplies previous-day OI on Upstox.
+- **Stock futures:** front + next month for all 218 stocks are streamed (436 slots reserved): price,
+  basis (premium/discount %), OI change vs previous day, futures buildup label, rollover %. History
+  (bhavcopy STF rows) adds futures OI 5/20-day change, OI streak and repeated daily activity.
+  Alerts: FUT_BUILDUP (price >= 1 % and OI >= 5 %), BASIS flip (premium <-> discount).
 - **Context** (`trackers/nse_context.py`): F&O ban list, MWPL usage %, corporate-event calendar.
 - **Trends** (`trackers/trend.py`): per strike and per stock, on 3-min candles — start = EMA5>EMA13
   + above VWAP + 3 green candles + min move from the swing low; end = close below EMA13/VWAP or 50 %
@@ -122,10 +126,10 @@ never feeds the strangle engine.
   one-sided %, max pull-back, and why/when it ended — saved to `data/tracker_trends.json`.
 - **Alerts** (saved to `data/tracker_alerts.json`, each with a plain-language *reason* and the
   stock's *first alert of the day*): PRICE, OI, VOLUME burst, UNUSUAL Vol/OI, IV spike, ALL-TIME
-  HIGH break, TREND start/end, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
+  HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
   breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
   NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
-- **Test:** `py test_tracker.py` (offline, 82 checks incl. a WebSocket round-trip with a fake Dhan
+- **Test:** `py test_tracker.py` (offline, 89 checks incl. a WebSocket round-trip with a fake Dhan
   feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
 - Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 
