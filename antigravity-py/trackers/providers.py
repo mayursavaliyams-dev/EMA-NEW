@@ -359,54 +359,78 @@ class DhanProvider:
         live = sum(1 for s in self.conn_state if s.startswith("connected"))
         return f"Dhan {live}/{self.n_conn} connections · {len(self.key_conn)} subscribed"
 
-    @staticmethod
-    def _depth(raw):
+    # precompiled packet layouts (hot path: thousands of packets / second)
+    _S_TICK = struct.Struct("<BHBIfI")
+    _S_QUOTE = struct.Struct("<BHBIfHIfIIIffff")
+    _S_OI = struct.Struct("<BHBII")
+    _S_FULL = struct.Struct("<BHBIfHIfIIIIIIffff")
+    _S_DEPTH = struct.Struct("<" + "IIHHff" * 5)
+    _S_DISC = struct.Struct("<BHBIH")
+    _SIZE = {2: 16, 4: 50, 5: 12, 6: 16, 7: 8, 8: 162, 50: 10, 3: 112}
+
+    @classmethod
+    def _depth(cls, raw, off=0):
         """5 levels of <IIHHff (bid_qty, ask_qty, bid_orders, ask_orders, bid_price, ask_price)."""
-        lv = [struct.unpack_from("<IIHHff", raw, i * 20) for i in range(5)]
-        b, a = lv[0][4], lv[0][5]
+        d = cls._S_DEPTH.unpack_from(raw, off)
+        b, a = d[4], d[5]
         return {"bid": round(b, 2) if b > 0 else None, "ask": round(a, 2) if a > 0 else None,
-                "bid_qty": lv[0][0], "ask_qty": lv[0][1],
-                "depth_bid_qty": sum(x[0] for x in lv), "depth_ask_qty": sum(x[1] for x in lv)}
+                "bid_qty": d[0], "ask_qty": d[1],
+                "depth_bid_qty": d[0] + d[6] + d[12] + d[18] + d[24], "depth_ask_qty": d[1] + d[7] + d[13] + d[19] + d[25]}
 
     def parse(self, buf):
-        """Parse one WS message (may hold several packets). Returns list of (key, fields)."""
+        """Parse one WS message (may hold several packets). Returns list of (key, fields).
+        Optimised: precompiled structs, unpack_from on the buffer (no copies), rounding only prices."""
         out, off, n = [], 0, len(buf)
         now = time.time()
+        seg = self.SEG_NAME
+        cb = self.on_data
+        sizes = self._SIZE
         while off + 8 <= n:
             code = buf[off]
-            spec = self.PKT.get(code)
-            if not spec or off + spec[0] > n:
+            size = sizes.get(code)
+            if size is None or off + size > n:
                 break
-            size, fmt = spec
-            u = struct.unpack(fmt, bytes(buf[off:off + struct.calcsize(fmt)]))
-            off += size
-            key = f"{self.SEG_NAME.get(u[2], u[2])}|{u[3]}"
-            if code == 2:
-                f = {"ltp": u[4], "ltt": u[5]}
+            if code == 8:
+                u = self._S_FULL.unpack_from(buf, off)
+                f = {"ltp": round(u[4], 2), "ltq": u[5], "ltt": u[6], "vwap": round(u[7], 2), "volume": u[8], "tsq": u[9],
+                     "tbq": u[10], "oi": u[11], "oi_hi": u[12], "oi_lo": u[13], "open": round(u[14], 2),
+                     "prev_close": round(u[15], 2), "high": round(u[16], 2), "low": round(u[17], 2)}
+                d = self._depth(buf, off + 62)
+                if d["bid"] is None:
+                    del d["bid"]
+                if d["ask"] is None:
+                    del d["ask"]
+                f.update(d)
+            elif code == 2:
+                u = self._S_TICK.unpack_from(buf, off)
+                f = {"ltp": round(u[4], 2), "ltt": u[5]}
             elif code == 4:
-                f = {"ltp": u[4], "ltq": u[5], "ltt": u[6], "vwap": u[7], "volume": u[8], "tsq": u[9],
-                     "tbq": u[10], "open": u[11], "prev_close": u[12], "high": u[13], "low": u[14]}
+                u = self._S_QUOTE.unpack_from(buf, off)
+                f = {"ltp": round(u[4], 2), "ltq": u[5], "ltt": u[6], "vwap": round(u[7], 2), "volume": u[8], "tsq": u[9],
+                     "tbq": u[10], "open": round(u[11], 2), "prev_close": round(u[12], 2), "high": round(u[13], 2),
+                     "low": round(u[14], 2)}
             elif code == 5:
+                u = self._S_OI.unpack_from(buf, off)
                 f = {"oi": u[4]}
             elif code == 6:
-                f = {"prev_close": u[4], "prev_oi": u[5]}
-            elif code == 8:
-                f = {"ltp": u[4], "ltq": u[5], "ltt": u[6], "vwap": u[7], "volume": u[8], "tsq": u[9],
-                     "tbq": u[10], "oi": u[11], "oi_hi": u[12], "oi_lo": u[13], "open": u[14],
-                     "prev_close": u[15], "high": u[16], "low": u[17]}
-                f.update(self._depth(u[18]))
+                u = self._S_TICK.unpack_from(buf, off)
+                f = {"prev_close": round(u[4], 2), "prev_oi": u[5]}
             elif code == 50:
+                u = self._S_DISC.unpack_from(buf, off)
+                off += size
                 reason = self.DISCONNECT.get(u[4], f"server disconnect code {u[4]}")
                 if u[4] in (806, 807, 808, 809):
                     self.fatal = reason
                 self._status()
                 continue
             else:
+                off += size
                 continue
-            f = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items() if v is not None}
+            off += size
+            key = f"{seg.get(u[2], u[2])}|{u[3]}"
             out.append((key, f))
-            if self.on_data:
-                self.on_data(key, f, now)
+            if cb:
+                cb(key, f, now)
         return out
 
 

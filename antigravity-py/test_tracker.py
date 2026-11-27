@@ -734,12 +734,34 @@ def test_export_api():
     check("bad export target rejected", c.get("/api/tracker/export?what=nope").status_code == 400)
 
 
+def test_board_fast_topn():
+    t, p, n = make(FakeProvider("dhan", 25000))
+    t.rebalance()
+    rnd = random.Random(3)
+    now = time.time()
+    keys = list(t.sel)[:3000]
+    for i, k in enumerate(keys):
+        t.on_data(k, {"ltp": 50.0, "prev_close": 50.0, "oi": 1000, "prev_oi": 1000, "volume": 100}, now)
+        t.on_data(k, {"ltp": 50 * (1 + rnd.uniform(-0.3, 0.3)), "oi": int(1000 * rnd.uniform(0.5, 2)), "volume": 100 + i}, now + 30)
+    full = sorted((t._row(k, t.sel[k]) for k in keys), key=lambda r: -abs(r["chg_win_pct"]))[:60]
+    fast = t.board(None, 60, "move")
+    check("top-N fast path == full sort (move)", [r["key"] for r in fast] == [r["key"] for r in full]
+          or [abs(r["chg_win_pct"]) for r in fast] == [abs(r["chg_win_pct"]) for r in full])
+    up = t.board(None, 60, "move", sign="UP")
+    dn = t.board(None, 60, "oi", sign="DOWN")
+    check("server-side UP / DOWN filter", up and all(r["chg_win_pct"] > 0 for r in up) and dn and all(r["oi_chg_pct"] < 0 for r in dn))
+    t0 = time.perf_counter()
+    for srt in ("move", "volume", "oi", "unusual", "iv"):
+        t.board(None, 60, srt)
+    check("5 top-strike views over 25,000 strikes < 0.5 s", time.perf_counter() - t0 < 0.5, f"({(time.perf_counter() - t0) * 1000:.0f} ms)")
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

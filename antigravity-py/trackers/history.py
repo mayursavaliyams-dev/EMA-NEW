@@ -65,6 +65,7 @@ class History:
         self.iv_hist = {}             # sym -> [(date, front ATM IV %, next ATM IV % | None)]
         self.stock_days = {}          # sym -> [ {date, undl, ce_oi, pe_oi, ce_choi, pe_choi, ce_vol, pe_vol, ce_lab{}, pe_lab{}} ]
         self.status = "not loaded"
+        self._state = None
         self.loaded_at = 0.0
 
     # ---------------- download / cache ----------------
@@ -120,100 +121,152 @@ class History:
         return got, errs
 
     # ---------------- build ----------------
+    STATE = "_state.pkl"
+    STATE_VER = 2
+
     def load(self, today=None):
+        """Incremental: the built state is pickled; only bhavcopy days not yet processed are parsed.
+        First build ~25 s, later loads / the 30-min refresh well under a second."""
         today = today or datetime.now(IST).date()
         self.status = "downloading NSE bhavcopy…"
         got, errs = self.sync(today)
-        self.status = "building…"
         files = sorted(f for f in os.listdir(self.cache) if f.endswith(".csv.gz"))
         cutoff = (today - timedelta(days=self.lookback)).strftime("%Y%m%d")
         files = [f for f in files if f[:8] >= cutoff]
-        contracts, stock_days, dates, iv_rows = {}, defaultdict(list), [], []
+        st = self._state or self._read_state()
+        if not st or st.get("ver") != self.STATE_VER or st["files"] != files[:len(st["files"])]:
+            st = {"ver": self.STATE_VER, "files": [], "contracts": {}, "stock_days": defaultdict(list),
+                  "dates": [], "iv_rows": []}
+        new = files[len(st["files"]):]
+        if new:
+            self.status = f"building… ({len(new)} new day file(s))"
+            for fn in new:
+                self._process_file(fn, st)
+            st["files"] = st["files"] + new
+            today_s = today.strftime("%Y-%m-%d")
+            st["contracts"] = {t: c for t, c in st["contracts"].items() if c["exp"] >= today_s}   # drop expired
+            self._write_state(st)
+        self._state = st
         today_s = today.strftime("%Y-%m-%d")
-        for fn in files:
-            date = f"{fn[:4]}-{fn[4:6]}-{fn[6:8]}"
-            dates.append(date)
-            agg, futd, atmc = {}, {}, {}
-            with gzip.open(os.path.join(self.cache, fn), "rt", encoding="utf-8", newline="") as f:
-                for x in csv.DictReader(f):
-                    tok, sym = x["tok"], x["sym"]
-                    hi, lo, cl, pv = _f(x["high"]), _f(x["low"]), _f(x["close"]), _f(x["prev"])
-                    oi, choi, vol = int(_f(x["oi"])), int(_f(x["choi"])), int(_f(x["vol"]))
-                    c = contracts.get(tok)
-                    if c is None:
-                        c = contracts[tok] = {"sym": sym, "exp": x["exp"], "strike": _f(x["strike"]), "opt": x["opt"],
-                                              "listed": date, "ath": None, "ath_d": None, "atl": None, "atl_d": None,
-                                              "oi_hist": [], "oi_streak": 0, "last_d": None, "last_oi": 0,
-                                              "last_close": None, "lab_hist": []}
-                    if vol > 0 and hi > 0:
-                        if c["ath"] is None or hi > c["ath"]:
-                            c["ath"], c["ath_d"] = hi, date
-                        if lo > 0 and (c["atl"] is None or lo < c["atl"]):
-                            c["atl"], c["atl_d"] = lo, date
-                    c["oi_hist"].append((date, oi))
-                    if len(c["oi_hist"]) > KEEP_OI:
-                        del c["oi_hist"][0]
-                    c["oi_streak"] = c["oi_streak"] + 1 if choi > 0 else (c["oi_streak"] - 1 if c["oi_streak"] < 0 and choi < 0 else (-1 if choi < 0 else 0))
-                    lab = label(cl - pv, choi) if (vol > 0 or choi) else None
-                    c["lab_hist"].append(lab)
-                    if len(c["lab_hist"]) > 10:
-                        del c["lab_hist"][0]
-                    c["last_d"], c["last_oi"], c["last_close"] = date, oi, cl
-                    if x["opt"] in ("CE", "PE") and x["exp"] > date and cl > 0:
-                        # ATM-IV candidates: per stock / expiry / strike keep CE & PE close
-                        atmc.setdefault(sym, {}).setdefault(x["exp"], {}).setdefault(_f(x["strike"]), {})[x["opt"]] = cl
-                        atmc[sym]["_u"] = _f(x["undl"])
-                    if x["opt"] == "FUT":
-                        futd.setdefault(sym, []).append((x["exp"], oi, choi, cl, pv, vol, _f(x["undl"])))
-                        continue
-                    a = agg.get(sym)
-                    if a is None:
-                        a = agg[sym] = {"date": date, "undl": _f(x["undl"]), "ce_oi": 0, "pe_oi": 0, "ce_choi": 0,
-                                        "pe_choi": 0, "ce_vol": 0, "pe_vol": 0,
-                                        "ce_lab": {"LB": 0, "SB": 0, "SC": 0, "LU": 0},
-                                        "pe_lab": {"LB": 0, "SB": 0, "SC": 0, "LU": 0}}
-                    side = "ce" if x["opt"] == "CE" else "pe"
-                    a[side + "_oi"] += oi
-                    a[side + "_choi"] += choi
-                    a[side + "_vol"] += vol
-                    if lab:
-                        a[side + "_lab"][lab] += abs(choi)
-            for sym, ex in atmc.items():
-                u = ex.pop("_u", 0)
-                if not u:
-                    continue
-                for slot, e in enumerate(sorted(ex)[:2]):          # front, next expiry
-                    both = [(abs(k - u), k, v) for k, v in ex[e].items() if "CE" in v and "PE" in v]
-                    if not both:
-                        continue
-                    _, k, v = min(both)
-                    T = max((datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(date, "%Y-%m-%d")).days, 0.25) / 365
-                    iv_rows.append((sym, date, slot, u, k, T, v["CE"], v["PE"]))
-            for sym, fl in futd.items():
-                a = agg.get(sym)
-                if a is None:
-                    continue
-                fl.sort()
-                front = fl[0]                                   # nearest expiry = front month
-                tot = sum(v[1] for v in fl)
-                a.update({"fut_oi": tot, "fut_choi": sum(v[2] for v in fl), "fut_close": front[3],
-                          "fut_basis_pct": round((front[3] - front[6]) / front[6] * 100, 2) if front[6] else None,
-                          "fut_day": label(front[3] - front[4], front[2]) if front[5] or front[2] else None,
-                          "rollover_pct": round((tot - front[1]) / tot * 100, 1) if tot else None})
-            for sym, a in agg.items():
-                a["ce_day"] = max(a["ce_lab"], key=a["ce_lab"].get) if any(a["ce_lab"].values()) else None
-                a["pe_day"] = max(a["pe_lab"], key=a["pe_lab"].get) if any(a["pe_lab"].values()) else None
-                a["pcr"] = round(a["pe_oi"] / a["ce_oi"], 2) if a["ce_oi"] else None
-                stock_days[sym].append(a)
-        # drop expired contracts (keeps memory small); ATH/ATL only matter for live ones
-        live = {t: c for t, c in contracts.items() if c["exp"] >= today_s}
-        iv_hist = self._iv_history(iv_rows)
+        live = {t: c for t, c in st["contracts"].items() if c["exp"] >= today_s}
+        if new or not self.iv_hist:
+            self.iv_hist = self._iv_history(st["iv_rows"])
         with self._lock:
-            self.contracts, self.stock_days, self.dates, self.iv_hist = live, dict(stock_days), dates, iv_hist
+            self.contracts, self.stock_days, self.dates = live, dict(st["stock_days"]), list(st["dates"])
         self.loaded_at = time.time()
+        dates = self.dates
         self.status = (f"{len(dates)} trading days ({dates[0]} → {dates[-1]})" if dates else "no bhavcopy data") + \
                       (f" · {errs} download errors" if errs else "")
         return self
+
+    def _read_state(self):
+        try:
+            import pickle
+            with open(os.path.join(self.cache, self.STATE), "rb") as f:
+                st = pickle.load(f)
+            st["stock_days"] = defaultdict(list, st["stock_days"])
+            return st
+        except Exception:
+            return None
+
+    def _write_state(self, st):
+        try:
+            import pickle
+            path = os.path.join(self.cache, self.STATE)
+            with open(path + ".tmp", "wb") as f:
+                pickle.dump({**st, "stock_days": dict(st["stock_days"])}, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(path + ".tmp", path)
+        except Exception:
+            pass
+
+    def _process_file(self, fn, st):
+        contracts, stock_days, iv_rows = st["contracts"], st["stock_days"], st["iv_rows"]
+        date = f"{fn[:4]}-{fn[4:6]}-{fn[6:8]}"
+        st["dates"].append(date)
+        agg, futd, atmc = {}, {}, {}
+        with gzip.open(os.path.join(self.cache, fn), "rt", encoding="utf-8", newline="") as f:
+            rd = csv.reader(f)
+            head = next(rd, None)
+            if head != FIELDS:
+                return
+            for x in rd:                       # tok sym exp strike opt open high low close prev oi choi vol undl
+                if len(x) < 14:
+                    continue
+                tok, sym, exp, opt = x[0], x[1], x[2], x[4]
+                hi, lo, cl, pv = _f(x[6]), _f(x[7]), _f(x[8]), _f(x[9])
+                oi, choi, vol = int(_f(x[10])), int(_f(x[11])), int(_f(x[12]))
+                c = contracts.get(tok)
+                if c is None:
+                    c = contracts[tok] = {"sym": sym, "exp": exp, "strike": _f(x[3]), "opt": opt,
+                                          "listed": date, "ath": None, "ath_d": None, "atl": None, "atl_d": None,
+                                          "oi_hist": [], "oi_streak": 0, "last_d": None, "last_oi": 0,
+                                          "last_close": None, "lab_hist": []}
+                if vol > 0 and hi > 0:
+                    if c["ath"] is None or hi > c["ath"]:
+                        c["ath"], c["ath_d"] = hi, date
+                    if lo > 0 and (c["atl"] is None or lo < c["atl"]):
+                        c["atl"], c["atl_d"] = lo, date
+                oh = c["oi_hist"]
+                oh.append((date, oi))
+                if len(oh) > KEEP_OI:
+                    del oh[0]
+                s_ = c["oi_streak"]
+                c["oi_streak"] = s_ + 1 if choi > 0 and s_ >= 0 else 1 if choi > 0 else (s_ - 1 if s_ < 0 else -1) if choi < 0 else 0
+                lab = label(cl - pv, choi) if (vol > 0 or choi) else None
+                lh = c["lab_hist"]
+                lh.append(lab)
+                if len(lh) > 10:
+                    del lh[0]
+                c["last_d"], c["last_oi"], c["last_close"] = date, oi, cl
+                if opt == "FUT":
+                    futd.setdefault(sym, []).append((exp, oi, choi, cl, pv, vol, _f(x[13])))
+                    continue
+                if exp > date and cl > 0:
+                    # ATM-IV candidates: per stock / expiry / strike keep CE & PE close
+                    e = atmc.get(sym)
+                    if e is None:
+                        e = atmc[sym] = {"_u": _f(x[13])}
+                    e.setdefault(exp, {}).setdefault(_f(x[3]), {})[opt] = cl
+                a = agg.get(sym)
+                if a is None:
+                    a = agg[sym] = {"date": date, "undl": _f(x[13]), "ce_oi": 0, "pe_oi": 0, "ce_choi": 0,
+                                    "pe_choi": 0, "ce_vol": 0, "pe_vol": 0,
+                                    "ce_lab": {"LB": 0, "SB": 0, "SC": 0, "LU": 0},
+                                    "pe_lab": {"LB": 0, "SB": 0, "SC": 0, "LU": 0}}
+                side = "ce" if opt == "CE" else "pe"
+                a[side + "_oi"] += oi
+                a[side + "_choi"] += choi
+                a[side + "_vol"] += vol
+                if lab:
+                    a[side + "_lab"][lab] += abs(choi)
+        d0 = datetime.strptime(date, "%Y-%m-%d")
+        for sym, ex in atmc.items():
+            u = ex.pop("_u", 0)
+            if not u:
+                continue
+            for slot, e in enumerate(sorted(ex)[:2]):          # front, next expiry
+                both = [(abs(k - u), k, v) for k, v in ex[e].items() if "CE" in v and "PE" in v]
+                if not both:
+                    continue
+                _, k, v = min(both)
+                T = max((datetime.strptime(e, "%Y-%m-%d") - d0).days, 0.25) / 365
+                iv_rows.append((sym, date, slot, u, k, T, v["CE"], v["PE"]))
+        for sym, fl in futd.items():
+            a = agg.get(sym)
+            if a is None:
+                continue
+            fl.sort()
+            front = fl[0]                                   # nearest expiry = front month
+            tot = sum(v[1] for v in fl)
+            a.update({"fut_oi": tot, "fut_choi": sum(v[2] for v in fl), "fut_close": front[3],
+                      "fut_basis_pct": round((front[3] - front[6]) / front[6] * 100, 2) if front[6] else None,
+                      "fut_day": label(front[3] - front[4], front[2]) if front[5] or front[2] else None,
+                      "rollover_pct": round((tot - front[1]) / tot * 100, 1) if tot else None})
+        for sym, a in agg.items():
+            a["ce_day"] = max(a["ce_lab"], key=a["ce_lab"].get) if any(a["ce_lab"].values()) else None
+            a["pe_day"] = max(a["pe_lab"], key=a["pe_lab"].get) if any(a["pe_lab"].values()) else None
+            a["pcr"] = round(a["pe_oi"] / a["ce_oi"], 2) if a["ce_oi"] else None
+            stock_days[sym].append(a)
 
     # ---------------- implied-volatility history (ATM, from closing prices) ----------------
     @staticmethod

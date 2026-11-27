@@ -24,6 +24,7 @@ Pipeline
 import os
 import json
 import time
+import heapq
 import queue
 import threading
 from collections import deque, defaultdict
@@ -108,9 +109,17 @@ def market_window(n=None):
     return 9 * 60 <= m <= 15 * 60 + 35
 
 
+_OPEN_CACHE = {}
+
+
 def session_open_ts(ts):
-    d = datetime.fromtimestamp(ts, IST)
-    return d.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
+    """09:15 IST of ts's day (cached per day — called on every volume tick)."""
+    day = int((ts + 19800) // 86400)
+    v = _OPEN_CACHE.get(day)
+    if v is None:
+        d = datetime.fromtimestamp(ts, IST)
+        v = _OPEN_CACHE[day] = d.replace(hour=9, minute=15, second=0, microsecond=0).timestamp()
+    return v
 
 
 # ======================================================================
@@ -676,23 +685,28 @@ class StockOptionsTracker:
         cur = self.latest.get(key)
         if cur is None:
             cur = self.latest[key] = {}
+        # only run detectors on values that actually changed (a FULL packet repeats most fields)
+        ltp, oi, vol = f.get("ltp"), f.get("oi"), f.get("volume")
+        new_px = ltp is not None and ltp != cur.get("ltp")
+        new_oi = oi is not None and oi != cur.get("oi")
+        new_vol = bool(vol) and vol != cur.get("volume")
         cur.update(f)
         cur["ts"] = ts
         self.stats["ticks"] += 1
         put = self._events.put
-        if "ltp" in f:
-            ev = self.det.on_price(key, f["ltp"], ts)
+        if new_px:
+            ev = self.det.on_price(key, ltp, ts)
             if ev:
                 put(ev)
-            for e in self.trend.on_price(key, f["ltp"], ts, cur.get("vwap")):
+            for e in self.trend.on_price(key, ltp, ts, cur.get("vwap")):
                 self._trend_event(e, m["symbol"], m, ts)
             self._ath_check(key, m, cur, ts)
-        if f.get("oi") is not None:
-            ev = self.det.on_oi(key, f["oi"], ts, m["lot"])
+        if new_oi:
+            ev = self.det.on_oi(key, oi, ts, m["lot"])
             if ev:
                 put(ev)
-        if f.get("volume"):
-            ev = self.det.on_volume(key, f["volume"], ts, m["lot"])
+        if new_vol:
+            ev = self.det.on_volume(key, vol, ts, m["lot"])
             if ev:
                 put(ev)
             self._unusual_check(key, m, cur, ts)
@@ -718,8 +732,17 @@ class StockOptionsTracker:
         return key.split("|", 1)[1] if "|" in key else key
 
     def hist_of(self, key):
+        """History snapshot for a contract — cached until the history reloads (called on every tick)."""
         h = self.hist
-        return h.contract(self._tok(key)) if h else None
+        if not h:
+            return None
+        stamp = getattr(h, "loaded_at", 0)
+        if getattr(self, "_hc_stamp", None) != stamp:
+            self._hc, self._hc_stamp = {}, stamp
+        v = self._hc.get(key, False)
+        if v is False:
+            v = self._hc[key] = h.contract(self._tok(key))
+        return v
 
     def prev_oi(self, key, lv=None):
         lv = lv if lv is not None else self.latest.get(key, {})
@@ -951,7 +974,7 @@ class StockOptionsTracker:
     def sectors(self):
         """Sector heatmap rows from the per-stock summary."""
         out = {}
-        for a in self.summary():
+        for a in self.summary(max_age=2.0):
             sec = a.get("sector") or "Other"
             o = out.setdefault(sec, {"sector": sec, "stocks": 0, "up": 0, "down": 0, "_chg": [], "ce_oi_chg": 0, "pe_oi_chg": 0,
                                      "fut_lb": 0, "fut_sb": 0, "fut_sc": 0, "fut_lu": 0, "alerts": 0, "members": []})
@@ -1358,7 +1381,9 @@ class StockOptionsTracker:
                           if tr else None),
                 "chg_win_pct": self.det.change_pct(k)}
 
-    def board(self, symbol=None, limit=60, sort="move", expiry=None):
+    def board(self, symbol=None, limit=60, sort="move", expiry=None, sign=None):
+        """symbol -> full ladder. Otherwise the top `limit` strikes by `sort`, optionally only UP/DOWN.
+        Fast path: rank on a cheap key first, build full rows only for the winners."""
         with self._lock:
             sel = list(self.sel.items())
         if symbol:
@@ -1367,24 +1392,61 @@ class StockOptionsTracker:
                     and (m["expiry"] == expiry if expiry else m.get("front", True))]
             rows.sort(key=lambda r: (r["strike"], r["opt"]))
             return rows
-        if sort == "volume":
-            rows = [self._row(k, m) for k, m in sel if self.det.recent_volume(k)]
-            rows.sort(key=lambda r: -(r["vol_win"] or 0))
-        elif sort == "oi":
-            rows = [r for r in (self._row(k, m) for k, m in sel if k in self.latest) if r["oi_chg_pct"] is not None]
-            rows.sort(key=lambda r: -abs(r["oi_chg_pct"]))
-        elif sort == "unusual":
-            rows = [r for r in (self._row(k, m) for k, m in sel if k in self.latest) if r["vol_oi"]]
-            rows.sort(key=lambda r: -r["vol_oi"])
-        elif sort == "iv":
-            rows = [self._row(k, m) for k, m in sel if k in self.greeks]
-            rows.sort(key=lambda r: -(r["iv"] or 0))
-        else:
-            rows = [self._row(k, m) for k, m in sel if self.det.change_pct(k) is not None]
-            rows.sort(key=lambda r: -abs(r["chg_win_pct"]))
-        return rows[:limit]
+        latest, det, greeks = self.latest, self.det, self.greeks
 
-    def summary(self):
+        def oi_pct(k):
+            lv = latest.get(k)
+            if not lv or lv.get("oi") is None:
+                return None
+            poi = self.prev_oi(k, lv)
+            return (lv["oi"] - poi) / poi * 100 if poi else None
+
+        def vol_oi(k):
+            lv = latest.get(k)
+            if not lv or not lv.get("volume"):
+                return None
+            poi = self.prev_oi(k, lv)
+            return lv["volume"] / poi if poi else None
+
+        def day_chg(k):
+            lv = latest.get(k)
+            if not lv or not lv.get("ltp") or not lv.get("prev_close"):
+                return None
+            return (lv["ltp"] - lv["prev_close"]) / lv["prev_close"]
+
+        if sort == "volume":
+            rank, sgn = det.recent_volume, day_chg
+        elif sort == "oi":
+            rank, sgn = oi_pct, oi_pct
+        elif sort == "unusual":
+            rank, sgn = vol_oi, day_chg
+        elif sort == "iv":
+            rank, sgn = (lambda k: greeks[k]["iv"] if k in greeks else None), day_chg
+        else:
+            rank, sgn = det.change_pct, det.change_pct
+        cand = []
+        for k, m in sel:
+            v = rank(k)
+            if v is None or (sort == "volume" and not v):
+                continue
+            if sign:
+                sv = sgn(k)
+                if sv is None or (sign == "UP" and sv <= 0) or (sign == "DOWN" and sv >= 0):
+                    continue
+            cand.append((abs(v) if sort in ("move", "oi") else v, k, m))
+        top = heapq.nlargest(limit, cand, key=lambda x: x[0])
+        return [self._row(k, m) for _, k, m in top]
+
+    def summary(self, max_age=0.0):
+        """Cached for `max_age` s — the dashboard, sectors and futures views all read it."""
+        c = getattr(self, "_sum_cache", None)
+        if c and time.time() - c[0] < max_age:
+            return c[1]
+        out = self._summary()
+        self._sum_cache = (time.time(), out)
+        return out
+
+    def _summary(self):
         """Per-stock totals & OI/volume mapping across every tracked strike + context + trends."""
         with self._lock:
             sel = list(self.sel.items())

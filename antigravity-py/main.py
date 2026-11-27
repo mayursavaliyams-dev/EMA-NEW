@@ -26,6 +26,8 @@ engine = StrangleEngine(conn)
 news_hub = NewsHub()
 tracker = StockOptionsTracker(conn, news_hub)   # side tracker: display only, no orders
 app = FastAPI(title="Antigravity-Py", version="0.1")
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=2000)     # JSON tables compress ~8x
 
 
 def market_open():
@@ -180,27 +182,35 @@ def tracker_status():
 
 
 @app.get("/api/tracker/alerts")
-def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200):
+def tracker_alerts(status: str = "", symbol: str = "", limit: int = 200, dir: str = "", max_legs: int = 12):
     out = list(tracker.alerts)
     if status:
         out = [a for a in out if a["status"] == status.upper()]
     if symbol:
         out = [a for a in out if a["symbol"] == symbol.upper()]
-    return {"alerts": out[::-1][:limit]}
+    if dir:
+        out = [a for a in out if a.get("dir") == dir.upper()]
+    res = []
+    for a in out[::-1][:limit]:
+        if len(a.get("legs") or []) > max_legs:          # keep payloads small: merged alerts can hold many legs
+            a = {**a, "legs": a["legs"][:max_legs], "legs_more": len(a["legs"]) - max_legs}
+        res.append(a)
+    return {"alerts": res}
 
 
 @app.get("/api/tracker/board")
-def tracker_board(symbol: str = "", limit: int = 60, sort: str = "move", expiry: str = ""):
-    """symbol -> full strike ladder (front expiry, or ?expiry=); else top rows by sort = move | volume | oi."""
+def tracker_board(symbol: str = "", limit: int = 60, sort: str = "move", expiry: str = "", sign: str = ""):
+    """symbol -> full strike ladder (front expiry, or ?expiry=); else top rows by
+    sort = move | volume | oi | unusual | iv, optionally sign = UP | DOWN."""
     return {"symbol": symbol.upper() or None,
             "expiries": tracker.expiries(symbol) if symbol else [],
-            "rows": tracker.board(symbol or None, limit, sort, expiry or None)}
+            "rows": tracker.board(symbol or None, min(limit, 500), sort, expiry or None, sign.upper() or None)}
 
 
 @app.get("/api/tracker/summary")
 def tracker_summary():
     """Per-stock totals: CE/PE OI, PCR, OI change, volume, OI support/resistance, max-volume strike."""
-    return {"stocks": tracker.summary()}
+    return {"stocks": tracker.summary(max_age=2.0)}
 
 
 @app.get("/api/tracker/futures")
@@ -346,12 +356,32 @@ def tracker_symbols():
     return {"symbols": tracker.symbols()}
 
 
+_news_busy = set()
+
+
+def _news_refresh(sym, name):
+    import threading
+    if sym in _news_busy:
+        return
+    _news_busy.add(sym)
+
+    def run():
+        try:
+            news_hub.news_for(sym, name)
+        finally:
+            _news_busy.discard(sym)
+    threading.Thread(target=run, daemon=True).start()
+
+
 @app.get("/api/tracker/news")
 def tracker_news(symbol: str = "", hours: float = 24):
     since = datetime.now(IST).timestamp() - hours * 3600
     if symbol:
-        s = tracker.u.stocks.get(symbol.upper(), {})
-        return {"items": news_hub.news_for(symbol.upper(), s.get("name", symbol), since_ts=since)}
+        sym = symbol.upper()
+        s = tracker.u.stocks.get(sym, {})
+        # never block the request on the network: serve the cache, refresh it in the background
+        _news_refresh(sym, s.get("name", sym))
+        return {"items": news_hub.news_for(sym, s.get("name", sym), since_ts=since, fetch=False)}
     fo = set(tracker.u.stocks) or None
     return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
 

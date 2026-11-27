@@ -131,6 +131,12 @@ never feeds the strangle engine.
   "chat_id": "..."}` (gitignored); kinds pushed = setting `trkTelegramKinds`; test button in the tab.
 - **Export:** `/api/tracker/export?what=alerts|trends|summary|history|futures|sectors|participants&fmt=xlsx|csv`
   (buttons in the tab).
+- **Performance** (measured with 25,000 live instruments): Dhan packet parsing 39k → 80k packets/s
+  (precompiled structs, no copies, detectors only on changed values); top-strike views 0.8–1.2 s →
+  0.06–0.15 s (rank on a cheap key, build rows only for the top N); news never blocks a request
+  (cache + background refresh); history incremental with a pickled state (restart 3.9 s, 30-min refresh
+  0.6 s instead of 25 s); dashboard refreshes heavy tables every 15 s, news once a minute, never
+  overlaps calls; gzip on API responses (~8x smaller).
 - **Context** (`trackers/nse_context.py`): F&O ban list, MWPL usage %, corporate-event calendar.
 - **Trends** (`trackers/trend.py`): per strike and per stock, on 3-min candles — start = EMA5>EMA13
   + above VWAP + 3 green candles + min move from the swing low; end = close below EMA13/VWAP or 50 %
@@ -141,7 +147,7 @@ never feeds the strangle engine.
   HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
   breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
   NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
-- **Test:** `py test_tracker.py` (offline, 104 checks incl. a WebSocket round-trip with a fake Dhan
+- **Test:** `py test_tracker.py` (offline, 107 checks incl. a WebSocket round-trip with a fake Dhan
   feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
 - Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 
