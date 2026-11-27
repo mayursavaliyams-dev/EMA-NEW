@@ -386,6 +386,22 @@ def tracker_news(symbol: str = "", hours: float = 24):
     return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
 
 
+@app.get("/api/tracker/news/dhan-raw")
+def tracker_news_dhan_raw():
+    """Last raw Dhan news reply + how it was parsed (to confirm Dhan's real field names)."""
+    if not news_hub.dhan_enabled():
+        return {"enabled": False, "note": "Dhan news is used only when the tracker runs on Dhan (trkProvider=dhan)"}
+    if news_hub.dhan_raw is None:
+        news_hub.poll_dhan(force=True)
+    raw = news_hub.dhan_raw or {}
+    from trackers.news import dhan_news_items, parse_dhan_news
+    items = dhan_news_items(raw.get("reply"))
+    return {"enabled": True, "polls": news_hub.dhan_polls, "error": news_hub.errors.get("Dhan"),
+            "fields_seen": sorted({k for it in items for k in it})[:60], "raw_count": len(items),
+            "parsed_sample": parse_dhan_news(raw.get("reply"), tracker._sid_map())[:5],
+            "raw_sample": items[:3], "request": raw.get("request"), "at": raw.get("at")}
+
+
 @app.get("/api/tracker/settings")
 def tracker_settings_get():
     return {k: config.cfg(k) for k in TRK_SETTINGS}

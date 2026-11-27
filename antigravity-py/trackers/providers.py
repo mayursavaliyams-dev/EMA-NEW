@@ -131,6 +131,7 @@ class DhanProvider:
         self._http = httpx.Client(timeout=20)
         self._rl_quote = _RateLimit(1)       # Dhan: market-quote APIs 1 req/sec
         self._rl_data = _RateLimit(4)        # charts etc. (kept under 5/sec)
+        self._rl_news = _RateLimit(1)        # news headlines (limit undocumented: stay gentle)
         self.on_data = self.on_status = None
         self.conn_keys = [set() for _ in range(self.n_conn)]
         self.key_conn = {}
@@ -243,6 +244,11 @@ class DhanProvider:
                 if v.get("last_price"):
                     out["NSE_EQ|" + str(sid)] = float(v["last_price"])
         return out
+
+    def news(self, body):
+        """Dhan News Headlines (Pro Traders data plan): POST /data/newsheadline, list in data.latestNews."""
+        c = self.creds()
+        return self._post("/data/newsheadline", dict(body, dhanClientId=str(c.get("client_id", ""))), self._rl_news)
 
     def option_contracts(self, stock):
         return None              # new strikes arrive via the (conditionally re-downloaded) master
@@ -432,7 +438,9 @@ class DhanProvider:
                 u = self._S_DISC.unpack_from(buf, off)
                 off += size
                 reason = self.DISCONNECT.get(u[4], f"server disconnect code {u[4]}")
-                if u[4] in (806, 807, 808, 809):
+                if u[4] in (805, 806, 807, 808, 809):
+                    # 805 = Dhan's connection limit: stop instead of reconnecting, otherwise the
+                    # tracker and a live bot on the same account keep kicking each other off.
                     self.fatal = reason
                 self._status()
                 continue

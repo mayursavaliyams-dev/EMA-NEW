@@ -560,10 +560,21 @@ class StockOptionsTracker:
             self.sel, self.live_keys = {}, set()
             self._t_master = self._t_rebal = 0
             self.stats["provider"] = p.name
+        if hasattr(self.news, "set_dhan"):
+            if p.name == "dhan" and hasattr(p, "news"):
+                if not self.news.dhan_enabled():
+                    self.news.set_dhan(p.news, self._sid_map)
+            elif self.news.dhan_enabled():
+                self.news.set_dhan(None, lambda: {})
         if p.name not in self._feeds_started:
             self._feeds_started.add(p.name)
             p.start_feed(self.on_data, self._on_status)
         return p
+
+    def _sid_map(self):
+        """{underlying security id: (SYMBOL, company name)} for Dhan news tagging."""
+        return {s["underlying_key"].split("|", 1)[1]: (sym, s.get("name") or sym)
+                for sym, s in list(self.u.stocks.items()) if "|" in s.get("underlying_key", "")}
 
     def _on_status(self, text):
         self.stats["feed"] = text
@@ -596,6 +607,8 @@ class StockOptionsTracker:
             self.compute_greeks(now)
             self.stock_signals(now)
             self.analytics(now)
+        if hasattr(self.news, "poll_dhan"):
+            self.news.poll_dhan()
         self.stats["feed"] = self.p.status_text()
         self._drain_events()
         if now - self._t_recheck > 120:

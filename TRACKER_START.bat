@@ -50,10 +50,13 @@ if not exist "dhan.json" (
 )
 
 rem --- safety settings: paper only, Dhan only, 5 connections ---
+rem "TRACKER_START.bat now" = test right now even when the market is closed
+set "ALWAYS=False"
+if /i "%~1"=="now" set "ALWAYS=True"
 set "DHAN_CLIENT_ID="
 set "DHAN_ACCESS_TOKEN="
 set "PYTHONIOENCODING=utf-8"
-".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan', 'trkDhanConnections': 5})"
+".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan', 'trkDhanConnections': 5, 'trkAlwaysOn': %ALWAYS%})"
 
 echo.
 echo  ==========================================================

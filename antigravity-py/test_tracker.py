@@ -788,12 +788,54 @@ def test_auto_never_dhan_from_env_only():
             os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
+def test_dhan_news_and_805():
+    """Dhan News Headlines: tolerant parsing, tagging by security id, wiring into NewsHub; 805 stops the feed."""
+    from trackers.news import parse_dhan_news, NewsHub
+    sid = {"2885": ("RELIANCE", "RELIANCE INDUSTRIES LTD"), "1333": ("HDFCBANK", "HDFC BANK LTD")}
+    a = {"data": {"latestNews": [
+        {"headline": "Reliance wins big order", "publishedAt": 1795785873872, "securityId": "2885", "sentiment": "POSITIVE"},
+        {"title": "HDFC Bank Q3 update", "timestamp": "2026-11-27T10:15:00+05:30", "symbols": ["HDFCBANK"]},
+        {"newsHeadline": "Reliance Industries board meet", "date": "27-11-2026 09:30:00"},   # untagged -> name match
+        {"headline": "Monsoon outlook improves"},                                             # no stock
+        {"summary": "no title -> skipped"}]}}
+    out = parse_dhan_news(a, sid)
+    by = {(i["symbol"], i["title"]) for i in out}
+    check("Dhan news: securityId tag, epoch-ms time, sentiment",
+          ("RELIANCE", "Reliance wins big order") in by
+          and next(i for i in out if i["title"] == "Reliance wins big order")["sentiment"] == "POSITIVE"
+          and next(i for i in out if i["title"] == "Reliance wins big order")["time"].startswith("2026-11-27T18:54"))
+    check("Dhan news: other field names (title/symbols/ISO, newsHeadline/date) + headline name match",
+          ("HDFCBANK", "HDFC Bank Q3 update") in by and ("RELIANCE", "Reliance Industries board meet") in by)
+    check("Dhan news: untagged market news kept without a stock, item without title skipped",
+          ("", "Monsoon outlook improves") in by and len(out) == 4)
+    check("Dhan news: plain list / data list replies also parse",
+          len(parse_dhan_news([{"headline": "x"}], sid)) == 1 and len(parse_dhan_news({"data": [{"headline": "y"}]}, sid)) == 1)
+    h = NewsHub()
+    calls = []
+    h.set_dhan(lambda body: calls.append(body) or a, lambda: sid)
+    h.poll_dhan(force=True)
+    rel = h.dhan_for("RELIANCE", fetch=False)
+    check("NewsHub: Dhan headlines stored per stock, raw reply kept",
+          len(rel) == 2 and calls[0]["categories"] == ["ALL"] and h.dhan_raw["request"]["limit"] == 50)
+    h.dhan_for("HDFCBANK", fetch=True)
+    check("NewsHub: per-stock fetch sends stockList=[security id]", calls[-1].get("stockList") == ["1333"])
+    check("NewsHub: Dhan items in the global list (only tagged ones)",
+          {i["symbol"] for i in h.latest_nse() if i["source"].startswith("Dhan")} == {"RELIANCE", "HDFCBANK"})
+    h.set_dhan(lambda body: (_ for _ in ()).throw(RuntimeError("Dhan /data/newsheadline HTTP 403")), lambda: sid)
+    h.poll_dhan(force=True)
+    check("NewsHub: Dhan error shown, never raised", "403" in h.errors.get("Dhan", ""))
+    d = P.DhanProvider(creds={"client_id": "1", "access_token": "x"})
+    d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 805))
+    check("disconnect 805 (connection limit) -> feed stops, no reconnect fight with the live bot",
+          d.fatal and "5" in d.fatal and not d.available())
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")

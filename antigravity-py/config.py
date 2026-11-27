@@ -4,7 +4,7 @@ import os
 import json
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(BASE, "data")
+DATA = os.environ.get("AG_DATA_DIR") or os.path.join(BASE, "data")   # mock test uses its own folder
 OVERRIDES = os.path.join(DATA, "config-overrides.json")
 TOKEN_PATH = os.path.join(BASE, "token.json")
 
