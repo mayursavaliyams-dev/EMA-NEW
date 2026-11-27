@@ -142,6 +142,7 @@ class DhanProvider:
         self.conn_state = ["idle"] * self.n_conn
         self.fatal = None                    # set on auth-type disconnects -> fall back to Upstox
         self._pc_seen = set()                # (segment, security id) that got a PREV CLOSE packet
+        self._fatal_code = self._fatal_at = None
         self._lock = threading.Lock()
 
     # ---------------- credentials ----------------
@@ -166,8 +167,24 @@ class DhanProvider:
         return c
 
     def available(self):
+        self._token_refresh_check()
         c = self.creds()
         return bool(c.get("access_token") and c.get("client_id")) and not self.fatal
+
+    _TOKEN_FATAL = (807, 808, 809)
+
+    def _token_refresh_check(self):
+        """After a token-type stop (807/808/809), a NEW dhan.json (DHAN_TOKEN.bat) resumes the feed by itself."""
+        if not self.fatal or self._creds or getattr(self, "_fatal_code", None) not in self._TOKEN_FATAL:
+            return
+        try:
+            m = os.path.getmtime(DHAN_CRED_PATH)
+        except OSError:
+            return
+        if m > (self._fatal_at or 0):
+            self.fatal, self._fatal_code = None, None
+            if self.on_status:
+                self.on_status("Dhan: new token found - reconnecting")
 
     # ---------------- token renewal (Dhan tokens live ~24 h) ----------------
     @staticmethod
@@ -390,6 +407,8 @@ class DhanProvider:
         import websockets
         q = self._queues[i]
         while True:
+            if self.fatal:
+                self._token_refresh_check()
             if self.fatal or not self.conn_keys[i]:
                 self.conn_state[i] = "idle" if not self.fatal else "stopped"
                 await asyncio.sleep(3)
@@ -507,6 +526,7 @@ class DhanProvider:
                 off += size
                 reason = self.DISCONNECT.get(u[4], f"server disconnect code {u[4]}")
                 if u[4] in (805, 806, 807, 808, 809):
+                    self._fatal_code, self._fatal_at = u[4], time.time()
                     # 805 = Dhan's connection limit: stop instead of reconnecting, otherwise the
                     # tracker and a live bot on the same account keep kicking each other off.
                     self.fatal = reason

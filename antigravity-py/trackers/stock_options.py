@@ -761,13 +761,14 @@ class StockOptionsTracker:
             return
         if m is None:
             sym = self.ukeys.get(key)
-            if sym and f.get("ltp"):         # underlying stock tick: live spot + stock trend + ORB
-                self.spots[key] = f["ltp"]
-                self._orb(sym, key, f["ltp"], ts)
+            if sym:                          # underlying stock: keep every field (PREV CLOSE packets carry no ltp)
                 cur = self.latest.setdefault(key, {})
                 cur.update(f)
-                for e in self.trend.on_price(key, f["ltp"], ts, f.get("vwap") or cur.get("vwap"), underlying=True):
-                    self._trend_event(e, sym, None, ts)
+                if f.get("ltp"):             # live spot + stock trend + ORB
+                    self.spots[key] = f["ltp"]
+                    self._orb(sym, key, f["ltp"], ts)
+                    for e in self.trend.on_price(key, f["ltp"], ts, f.get("vwap") or cur.get("vwap"), underlying=True):
+                        self._trend_event(e, sym, None, ts)
             return
         cur = self.latest.get(key)
         if cur is None:

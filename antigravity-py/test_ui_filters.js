@@ -55,9 +55,18 @@ const R = []; const ok = (name, pass, info='') => { R.push([pass?'PASS':'FAIL', 
   await p.click('#tfb-trk-movers button[data-bu=""]');
   // min/max on a column
   await p.selectOption('#tfb-trk-movers select[data-k=fc]', '9'); // IV
-  await p.fill('#tfb-trk-movers input[data-k=fmin]', '30'); await p.fill('#tfb-trk-movers input[data-k=fmax]', '35'); await p.waitForTimeout(600);
-  const ivs = await p.$$eval('#trk-movers tbody tr', rs=>rs.filter(r=>r.style.display!=='none').map(r=>parseFloat(r.cells[9].textContent)));
-  ok('min/max: IV between 30 and 35', ivs.length>0 && ivs.every(v=>v>=30&&v<=35), `${ivs.length} rows`);
+  let allIv = [];
+  for (let t = 0; t < 10 && !allIv.length; t++) {   // IV is computed every 30 s: wait until the column has values
+    allIv = (await p.$$eval('#trk-movers tbody tr', rs=>rs.map(r=>parseFloat(r.cells[9].textContent)))).filter(v=>!isNaN(v)).sort((a,b)=>a-b);
+    if (!allIv.length) await p.waitForTimeout(3000);
+  }
+  const lo = allIv[Math.floor(allIv.length*0.25)], hi = allIv[Math.floor(allIv.length*0.75)];
+  await p.fill('#tfb-trk-movers input[data-k=fmin]', String(lo)); await p.fill('#tfb-trk-movers input[data-k=fmax]', String(hi)); await p.waitForTimeout(600);
+  const snap = await p.$$eval('#trk-movers tbody tr', rs=>rs.map(r=>[r.style.display!=='none', parseFloat(r.cells[9].textContent)]));
+  const inR = v => !isNaN(v) && v>=lo && v<=hi;
+  const vis = snap.filter(x=>x[0]), hid = snap.filter(x=>!x[0]);
+  ok(`min/max: IV between ${lo} and ${hi}`, allIv.length>0 && vis.length>0 && vis.every(x=>inR(x[1])) && hid.every(x=>!inR(x[1])),
+     `${vis.length} shown all inside, ${hid.length} hidden all outside`);
   await p.click('#tfb-trk-movers button[data-reset]'); await p.waitForTimeout(400);
   // sort by header
   await p.click('#trk-movers thead th:nth-child(10)'); await p.waitForTimeout(300);

@@ -360,4 +360,4 @@ if __name__ == "__main__":
     start_fake_dhan()
     app = build_app()
     print(f"[mock] MOCK TEST - nakli bhav. Dashboard: http://localhost:{APP_PORT}")
-    uvicorn.run(app, host="127.0.0.1", port=APP_PORT, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=APP_PORT, log_level="warning", access_log=False)

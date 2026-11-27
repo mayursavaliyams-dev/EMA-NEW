@@ -556,4 +556,6 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000)
+    # access_log off: the dashboard polls every few seconds; logging each request grows tracker.log by
+    # hundreds of MB a week when the tracker runs unattended for days
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, access_log=False)

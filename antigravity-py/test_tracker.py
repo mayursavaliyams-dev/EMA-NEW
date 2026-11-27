@@ -325,6 +325,13 @@ def test_dhan_packets():
     later = dict(d2.parse(full_pkt(201)))
     check("prev close: PREV CLOSE packet wins; FULL 'close' never overwrites it",
           first[0][1]["prev_close"] == 50.0 and "prev_close" not in first[1][1] and "prev_close" not in later["NSE_FNO|201"])
+    t, p, n = make(FakeProvider("dhan", 25000))
+    t.rebalance()
+    uk = next(iter(t.ukeys))
+    t.on_data(uk, {"prev_close": 1000.0, "prev_oi": 0}, time.time())
+    t.on_data(uk, {"ltp": 1010.0, "vwap": 1005.0}, time.time())
+    check("underlying: PREV CLOSE packet (no ltp) kept -> stock change % works",
+          t.latest[uk].get("prev_close") == 1000.0 and t.latest[uk].get("ltp") == 1010.0)
     check("prev close: FULL 'close' used only when no PREV CLOSE packet came",
           dict(d2.parse(full_pkt(202)))["NSE_FNO|202"]["prev_close"] == 10.0)
     d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
@@ -934,12 +941,33 @@ def test_dhan_rate_and_chart_window():
           d._rl_data.gap >= 1.1 - 1e-9 and d._rl_news.gap >= 3.0 - 1e-9)
 
 
+def test_token_replaced_resumes_feed():
+    """Token expired (807) stops the feed; a NEW dhan.json (DHAN_TOKEN.bat or auto-renew) resumes it without a restart."""
+    old = P.DHAN_CRED_PATH
+    P.DHAN_CRED_PATH = os.path.join(TMP, "dhan_resume.json")
+    try:
+        with open(P.DHAN_CRED_PATH, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "old"}, f)
+        os.utime(P.DHAN_CRED_PATH, (time.time() - 60, time.time() - 60))
+        d = P.DhanProvider(1)
+        d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 807))
+        check("807 -> stopped while the token file is unchanged", d.fatal and not d.available())
+        with open(P.DHAN_CRED_PATH, "w", encoding="utf-8") as f:
+            json.dump({"client_id": "1100", "access_token": "new"}, f)
+        check("new dhan.json -> feed resumes by itself", d.available() and d.fatal is None)
+        d.parse(struct.pack("<BHBIH", 50, 10, 0, 0, 805))
+        os.utime(P.DHAN_CRED_PATH, None)
+        check("805 (connection limit) is NOT auto-resumed by a token change", d.fatal and not d.available())
+    finally:
+        P.DHAN_CRED_PATH = old
+
+
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
                test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
-               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_dhan_rate_and_chart_window, test_speed]:
+               test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_auto_never_dhan_from_env_only, test_dhan_news_and_805, test_day_store_month, test_dhan_token_renew, test_dhan_rate_and_chart_window, test_token_replaced_resumes_feed, test_speed]:
         print(fn.__name__)
         fn()
     print(f"\nALL {len(PASS)} CHECKS PASSED")
