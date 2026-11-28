@@ -51,6 +51,40 @@ def _num(v):
         return None
 
 
+TECH_ALIAS = {"RSI": "RSI_14", "ADX": "ADX_14", "ATR": "ATR_14", "MACD": "MACD_HIST"}
+
+
+def parse_technical(data):
+    """Dhan /data/technical -> {RSI_14, ADX_14, EMA_20, EMA_50, ATR_14, MACD_HIST}.
+
+    Live reply (checked on DP545, 2026-11-28) differs from the request names:
+      {"data": {"RSI": {"value": 39.8, "action": "Neutral"}, "ADX": {...}, "ATR": {...},
+                "MACD_HIST": {...}, "EMA": [{"period": 20, "value": 1380.6, ...}, {"period": 50, ...}]}}
+    so RSI/ADX/ATR carry no period suffix and EMA is a list keyed by period. Names already in the
+    requested form (RSI_14, EMA_20 ...) are kept as they are."""
+    out = {}
+    for k, v in ((data or {}).get("data") or {}).items():
+        if isinstance(v, list):                         # EMA: [{"period": 20, "value": ...}, ...]
+            for e in v:
+                if isinstance(e, dict) and e.get("period") is not None:
+                    out[f"{k}_{int(e['period'])}"] = _num(e)
+            continue
+        out[TECH_ALIAS.get(k, k)] = _num(v)
+    return out
+
+
+def _news_time(s):
+    """Dhan publishDate is "YYYY-MM-DD HH:MM:SS" in the docs but a bare "YYYY-MM-DD" live.
+    Returns (datetime IST, has_time) or (None, False)."""
+    for fmt, has_time in (("%Y-%m-%d %H:%M:%S", True), ("%Y-%m-%dT%H:%M:%S", True), ("%Y-%m-%d %H:%M", True),
+                          ("%Y-%m-%d", False)):
+        try:
+            return datetime.strptime((s or "").strip()[:19], fmt).replace(tzinfo=IST), has_time
+        except ValueError:
+            continue
+    return None, False
+
+
 def trend_label(price, t):
     """UP / DOWN / SIDE from price vs EMA20/EMA50 and ADX strength (ADX >= 20 = trending)."""
     e20, e50, adx = t.get("EMA_20"), t.get("EMA_50"), t.get("ADX_14")
@@ -132,20 +166,23 @@ class DhanPro:
 
     # ---------------- News ----------------
     @staticmethod
-    def parse_news(data, symbols=None):
+    def parse_news(data, symbols=None, now=None):
         out = []
+        now = now or datetime.now(IST)
         for n in ((data or {}).get("data") or {}).get("latestNews") or []:
             o = n.get("newsObject") or {}
             sym = (n.get("smSymbol") or n.get("displaySymbol") or "").upper()
             if symbols is not None and sym not in symbols:
                 continue
-            try:
-                dt = datetime.strptime(n.get("publishDate", ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
-            except ValueError:
+            dt, has_time = _news_time(n.get("publishDate"))
+            if dt is None:
                 continue
+            if not has_time:
+                # date only (live replies): today's item -> first time we saw it; older -> that day's close
+                dt = now if dt.date() == now.date() else dt.replace(hour=15, minute=30)
             sent = (o.get("overallSentiment") or "NEUTRAL").upper()
             title = o.get("title") or ""
-            out.append({"source": "Dhan", "symbol": sym, "id": f"dhan:{sym}:{dt.timestamp():.0f}:{title[:60]}",
+            out.append({"source": "Dhan", "symbol": sym, "id": f"dhan:{sym}:{dt.date().isoformat()}:{title[:60]}",
                         "time": dt.isoformat(), "ts": dt.timestamp(), "title": title,
                         "summary": (o.get("text") or "")[:400], "url": "",
                         "sentiment": sent, "sent": SENT.get(sent, 0),
@@ -163,6 +200,9 @@ class DhanPro:
         cutoff = time.time() - 36 * 3600
         with self._lock:
             for it in items:
+                old = self.news.get(it["id"])
+                if old:                       # keep the first-seen time (date-only items get "now" each poll)
+                    it["time"], it["ts"] = old["time"], old["ts"]
                 self.news[it["id"]] = it
             old = sorted(self.news, key=lambda k: self.news[k]["ts"])
             for k in old[:max(0, len(old) - self.keep)] + [k for k in old if self.news[k]["ts"] < cutoff]:
@@ -243,7 +283,7 @@ class DhanPro:
                 if time.monotonic() < self.backoff.get("technical", 0):
                     break
                 continue
-            vals = {k: _num(v) for k, v in ((d or {}).get("data") or {}).items()}
+            vals = parse_technical(d)
             t = {k: (round(v, 2) if v is not None else None) for k, v in vals.items()}
             px = prices.get(sym)
             t.update({"time": datetime.now(IST).strftime("%H:%M"), "tf": str(timeframe), "price": px,

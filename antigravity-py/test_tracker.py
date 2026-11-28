@@ -674,6 +674,37 @@ def test_dhan_pro():
     check("pro: trend_label edge cases", DP.trend_label(None, {}) is None
           and DP.trend_label(100, {"EMA_20": 99, "EMA_50": 98, "ADX_14": 10}) == "UP (weak)")
 
+    # live reply shapes seen on DP545 (2026-11-28): technical names without the period, EMA as a
+    # list per period; news publishDate as a bare date. Both were dropped before.
+    live_tech = {"securityId": "2885", "timeframe": "15", "data": {
+        "RSI": {"value": 39.80691, "action": "Neutral"}, "ADX": {"value": 10.574911, "action": "Weak Trend"},
+        "EMA": [{"period": 20, "value": 1380.6318, "action": "Bearish"}, {"period": 50, "value": 1391.2, "action": "Bearish"}],
+        "ATR": {"value": 5.111526, "action": "Volatile"}, "MACD_HIST": {"value": -1.1111647, "action": "Bearish"}}}
+    pt = DP.parse_technical(live_tech)
+    check("pro technical (live shape): RSI/ADX/ATR without period + EMA list -> RSI_14, EMA_20, EMA_50 ...",
+          round(pt["RSI_14"], 2) == 39.81 and round(pt["ADX_14"], 2) == 10.57 and round(pt["ATR_14"], 2) == 5.11
+          and round(pt["EMA_20"], 2) == 1380.63 and pt["EMA_50"] == 1391.2 and round(pt["MACD_HIST"], 2) == -1.11, f"({pt})")
+    check("pro technical (live shape): trend label works again",
+          DP.trend_label(1375.0, {k: round(v, 2) for k, v in pt.items()}) == "DOWN (weak)")
+    now = datetime(2026, 11, 28, 17, 5, tzinfo=IST)
+    live_news = {"data": {"latestNews": [
+        {"newsObject": {"overallSentiment": "positive", "title": "Craftsman to acquire EATA", "text": "x"},
+         "category": "COMPANIES", "publishDate": "2026-11-28", "smSymbol": "CRAFTSMAN"},
+        {"newsObject": {"overallSentiment": "negative", "title": "Older item", "text": ""},
+         "category": "COMPANIES", "publishDate": "2026-11-27", "smSymbol": "CRAFTSMAN"}]}}
+    ln = DP.DhanPro.parse_news(live_news, now=now)
+    check("pro news (live shape): date-only publishDate kept, lowercase sentiment, today = first seen",
+          len(ln) == 2 and ln[0]["sentiment"] == "POSITIVE" and ln[0]["ts"] == now.timestamp()
+          and ln[1]["time"].startswith("2026-11-27T15:30") and ln[1]["sent"] == -1, f"({[(x['time'], x['sentiment']) for x in ln]})")
+    p2 = DP.DhanPro(lambda: {"client_id": "1", "access_token": "t"})
+    p2._post = lambda *a, **k: live_news
+    p2.poll_news()
+    first = {k: v["ts"] for k, v in p2.news.items()}
+    time.sleep(0.01)
+    p2.poll_news()
+    check("pro news (live shape): same headline on the next poll keeps one entry and its first-seen time",
+          len(p2.news) == 2 and {k: v["ts"] for k, v in p2.news.items()} == first)
+
 
 def test_news_relevance():
     from trackers.news import is_relevant, clean_name
