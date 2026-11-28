@@ -133,6 +133,26 @@
   #tab-tracker .panel{overflow:visible}
   #tab-tracker div[style*="max-height"]{max-height:none!important;overflow-y:visible!important;overflow-x:auto!important}
   #tab-tracker .trk-grid{grid-template-columns:1fr!important}
+  /* tracker sub-tabs: sticky menu + tools, one section per page */
+  .trk-top{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#141b2d,#101625);border-bottom:1px solid var(--bd);box-shadow:0 4px 12px rgba(0,0,0,.35)}
+  .trk-nav{display:flex;gap:4px;padding:8px 12px 0;flex-wrap:wrap}
+  .trk-nav button{background:transparent;border:1px solid transparent;border-bottom:3px solid transparent;color:var(--mut);padding:8px 14px;cursor:pointer;font-weight:700;font-size:.92em;border-radius:6px 6px 0 0}
+  .trk-nav button:hover{color:var(--txt);background:rgba(255,255,255,.03)}
+  .trk-nav button.on{color:var(--buy);border-bottom-color:var(--buy);background:rgba(0,245,212,.06)}
+  .trk-nav .cnt{font-family:var(--mono);font-size:.78em;background:rgba(255,214,10,.15);color:var(--warn);border-radius:9px;padding:0 6px;margin-left:3px}
+  .trk-nav .cnt:empty{display:none}
+  .trk-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 12px;border-top:1px solid var(--bd)}
+  .trk-srch input,.trk-in{background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;font-size:.88em;width:260px}
+  .trk-srch input:focus,.trk-in:focus{outline:none;border-color:var(--buy)}
+  .trk-pg{display:none;padding:10px 0 16px} .trk-pg.on{display:block}
+  .trk-pg>.panel{margin:0 12px 12px}
+  .pg-h{padding:4px 14px 0;font-weight:700;font-size:1.1em} .pg-h span{font-weight:400;color:var(--mut);font-size:.8em}
+  .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px;padding:0 12px}
+  .dash table tbody tr{cursor:pointer} .dash table tbody tr:hover td{background:rgba(41,98,255,.08)}
+  .more{cursor:pointer;color:var(--blue);font-weight:400;font-size:.85em} .more:hover{text-decoration:underline}
+  .tw{overflow-x:auto}
+  .trk-help-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:8px 20px;padding:12px 16px 16px;line-height:1.6}
+  .dal{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer} .dal:hover{background:rgba(41,98,255,.06)}
   #tab-tracker th{position:static!important}
   /* explanations */
   .ex{font-size:.85em;color:var(--mut);padding:6px 12px 8px;line-height:1.5;border-bottom:1px solid var(--bd)}
@@ -209,99 +229,175 @@
 </div><!-- /tab-trading -->
 
 <div id="tab-tracker" style="display:none">
-  <div style="padding:8px 14px 0;font-size:.85em;color:var(--mut);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-    <span>Side tracker · up to 25,000 CE/PE strikes across all F&amp;O stocks · OI · VWAP · volume · high/low · matched to NSE filings + Google News · <b style="color:var(--warn)">display only — never places orders</b></span>
-    <span style="margin-left:auto;display:flex;gap:8px;align-items:center"><span id="trk-upd" class="hl-badge"></span>
-      <span class="fs-ctl" title="text size (remembered)"><button onclick="trkFs(-1)">A−</button> <button onclick="trkFs(1)">A+</button></span></span></div>
-  <details class="trk-help" id="trk-help">
-    <summary>📘 આ પેજ કેવી રીતે વાંચવું? (રંગ, ▲▼, LB/SB/SC/LU નો અર્થ) — ખોલવા/બંધ કરવા ક્લિક કરો</summary>
-    <div class="g">
-      <div><b class="up">▲ લીલું</b> = ભાવ / OI વધ્યો · <b class="down">▼ લાલ/ગુલાબી</b> = ઘટ્યો. બધા % ની આગળ તીર છે.</div>
-      <div><b class="ce">CE</b> = Call (લીલું) · <b class="pe">PE</b> = Put (ગુલાબી). Strike ladder માં ડાબે CE, વચ્ચે Strike, જમણે PE.</div>
-      <div><span class="bu bu-LB">LB</span> Long buildup = ભાવ ↑ + OI ↑ (નવા ખરીદનાર, તેજી)</div>
-      <div><span class="bu bu-SB">SB</span> Short buildup = ભાવ ↓ + OI ↑ (નવા વેચનાર, મંદી)</div>
-      <div><span class="bu bu-SC">SC</span> Short covering = ભાવ ↑ + OI ↓ (વેચનાર બહાર નીકળે, ઝડપી ઉછાળો)</div>
-      <div><span class="bu bu-LU">LU</span> Long unwinding = ભાવ ↓ + OI ↓ (ખરીદનાર બહાર નીકળે)</div>
-      <div><span class="sr sr-R">R</span> Resistance = સૌથી વધુ CE OI વાળો strike · <span class="sr sr-S">S</span> Support = સૌથી વધુ PE OI વાળો strike</div>
-      <div>OI ખાનામાં રંગીન પટ્ટી = એ strike નું OI, સૌથી મોટા OI ની સરખામણીમાં (લાંબી પટ્ટી = મોટી દીવાલ).</div>
-      <div>આછો પીળો = In-the-money · ઘાટો પીળો = ATM (spot ની સૌથી નજીક).</div>
-      <div><b class="vw-up">VWAP લીલું</b> = ભાવ VWAP ઉપર (ખરીદી મજબૂત) · <b class="vw-dn">લાલ</b> = નીચે.</div>
-      <div>● = live ભાવ · <b class="up">H</b>/<b class="down">L</b> = દિવસના high/low પર · <b style="color:var(--warn)">★</b> = all-time high ની 3% અંદર · ↗↘ = trend ચાલુ.</div>
-      <div>PCR = Put OI ÷ Call OI (1 થી ઉપર = put વધુ, ઘણી વાર support). IV Rank 70+ = option મોંઘા, 30 નીચે = સસ્તા.</div>
-      <div>કોઈ પણ ભાવ પર માઉસ રાખો = IV, greeks, bid/ask, history. ક્લિક = chart. Stock પર ક્લિક = તેનો strike ladder.</div>
-      <div><b>NEWS-MATCH</b> = move સાથે news મળ્યા · <b>UNEXPLAINED</b> = news વગર move (ધ્યાન આપો) · <b>NEWS-AFTER</b> = news પાછળથી આવ્યા.</div>
+  <!-- sticky top bar: section menu + tools (same idea as Sensibull / Opstra top menus) -->
+  <div class="trk-top">
+    <nav class="trk-nav" id="trk-nav">
+      <button data-pg="home">🏠 Dashboard</button>
+      <button data-pg="chain">🔗 Option Chain</button>
+      <button data-pg="alerts">🚨 Alerts <span class="cnt" id="cnt-alerts"></span></button>
+      <button data-pg="movers">📈 Top Strikes</button>
+      <button data-pg="trends">🧭 Trends <span class="cnt" id="cnt-trends"></span></button>
+      <button data-pg="stocks">📊 All Stocks</button>
+      <button data-pg="multiday">🗓️ Multi-day OI</button>
+      <button data-pg="market">🌍 FII / DII · Deals</button>
+      <button data-pg="sectors">🗺️ Sectors</button>
+      <button data-pg="settings">⚙️ Settings</button>
+      <button data-pg="help">📘 મદદ</button>
+    </nav>
+    <div class="trk-tools">
+      <span class="trk-srch"><input id="trk-go" list="trk-syms" placeholder="🔍 Stock શોધો (દા.ત. RELIANCE) + Enter" autocomplete="off"><datalist id="trk-syms"></datalist></span>
+      <span class="hl-badge">બતાવો:</span><span class="flt" id="trk-ud"></span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span id="trk-upd" class="hl-badge"></span>
+        <span class="fs-ctl" title="અક્ષર નાના / મોટા (યાદ રહે છે)"><button onclick="trkFs(-1)">A−</button> <button onclick="trkFs(1)">A+</button></span></span>
     </div>
-  </details>
-  <div class="cards" id="trk-cards"></div>
-  <div style="display:flex;align-items:center;gap:8px;padding:0 14px 8px;flex-wrap:wrap"><span class="hl-badge">Show rows:</span><span class="flt" id="trk-ud"></span>
-    <span class="hl-badge">▲ UP = ફક્ત વધતા · ▼ DOWN = ફક્ત ઘટતા (alerts, trends, top strikes, all-stocks, multi-day બધામાં લાગુ)</span>
-    <span style="margin-left:auto;display:flex;gap:4px;align-items:center;flex-wrap:wrap"><span class="hl-badge">⬇ Excel:</span><span class="flt" id="trk-exp-btns"></span>
-      <button class="tg" onclick="trkTgTest()" title="send a test message to your Telegram">📱 Telegram test</button></span></div>
-  <div class="trk-grid" style="grid-template-columns:1fr 1fr">
+  </div>
+
+  <!-- 🏠 Dashboard -->
+  <section class="trk-pg" data-pg="home">
+    <div class="pg-h">🏠 Dashboard <span>— આજનું આખું ચિત્ર એક નજરમાં. કોઈ પણ stock પર ક્લિક = તેની Option Chain.</span></div>
+    <div class="cards" id="trk-cards"></div>
+    <div class="dash">
+      <div class="panel"><div class="ph"><span>▲ આજે સૌથી વધુ વધેલા stocks</span><a class="more" onclick="trkGo('stocks')">બધા જુઓ →</a></div><table id="dash-up"></table></div>
+      <div class="panel"><div class="ph"><span>▼ આજે સૌથી વધુ ઘટેલા stocks</span><a class="more" onclick="trkGo('stocks')">બધા જુઓ →</a></div><table id="dash-dn"></table></div>
+      <div class="panel"><div class="ph"><span>🚨 છેલ્લા alerts</span><a class="more" onclick="trkGo('alerts')">બધા જુઓ →</a></div><div id="dash-al" style="padding:6px 10px"></div></div>
+      <div class="panel"><div class="ph"><span>🧭 ચાલુ trends</span><a class="more" onclick="trkGo('trends')">બધા જુઓ →</a></div><table id="dash-tr"></table></div>
+    </div>
+  </section>
+
+  <!-- 🔗 Option Chain (one stock) -->
+  <section class="trk-pg" data-pg="chain">
+    <div class="panel">
+      <div class="ph"><span id="trk-lad-title">Strike ladder</span>
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select id="trk-sym" class="trk-sel"></select><select id="trk-exp" class="trk-sel"></select>
+          <span class="hl-badge">Strikes:</span><span class="flt" id="trk-rng"></span>
+          <button class="tg" onclick="trkChart('', TRK_SYM)">📈 Stock chart</button></span></div>
+      <div class="ex">એક stock ની આખી option chain. ડાબે <b class="ce">CE</b>, વચ્ચે Strike, જમણે <b class="pe">PE</b>. OI ખાનાની રંગીન પટ્ટી = OI ની દીવાલ. <span class="sr sr-R">R</span> = resistance, <span class="sr sr-S">S</span> = support. <b>Strikes</b> બટનથી ATM ની આસપાસ કેટલા strikes દેખાડવા તે પસંદ કરો. ભાવ પર ક્લિક = chart.</div>
+      <div class="tw"><table id="trk-ladder"></table></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><span id="trk-sd-title">🗓️ Day-by-day record</span></div>
+      <div class="ex">આ stock નો દરરોજનો હિસાબ (NSE): CE/PE OI કેટલું વધ્યું-ઘટ્યું અને કયું buildup હતું. જમણી બાજુ = કયા strikes માં દિવસો સુધી OI બંધાયું.</div>
+      <div class="tw"><table id="trk-sdays"></table></div>
+      <div class="tw" style="border-top:1px solid var(--bd)"><table id="trk-sbuild"></table></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><span>📰 News (24 કલાક)</span></div>
+      <div class="trk-news" id="trk-news" style="padding:4px 12px 8px"></div>
+    </div>
+  </section>
+
+  <!-- 🚨 Alerts -->
+  <section class="trk-pg" data-pg="alerts">
+    <div class="panel">
+      <div class="ph"><span>🚨 Alerts — premium / OI / volume spike vs news</span><span class="flt" id="trk-flt"></span></div>
+      <div class="ex">કોઈ option નો ભાવ, OI કે volume અચાનક ઉછળે ત્યારે alert. <b>Why</b> = કારણ, નીચે = કયા strikes અને કેટલો ફેરફાર, અને તે stock ના news. <b>NEWS-MATCH</b> = news મળ્યા · <b>UNEXPLAINED</b> = news વગર (ધ્યાન આપો) · <b>NEWS-AFTER</b> = news પાછળથી.</div>
+      <div id="trk-alerts" style="padding:8px"></div>
+    </div>
+  </section>
+
+  <!-- 📈 Top strikes -->
+  <section class="trk-pg" data-pg="movers">
+    <div class="panel">
+      <div class="ph"><span>📈 Top strikes</span><span class="flt" id="trk-msort"></span></div>
+      <div class="ex">બધા 25,000 strikes માંથી ટોચના 60. ઉપરના બટનથી ક્રમ બદલો: ભાવ ફેરફાર, હાલનું volume, OI ફેરફાર, Vol/OI (અસામાન્ય સોદા) કે IV. Row પર ક્લિક = chart.</div>
+      <div class="tw"><table id="trk-movers"></table></div>
+    </div>
+  </section>
+
+  <!-- 🧭 Trends -->
+  <section class="trk-pg" data-pg="trends">
+    <div class="panel">
+      <div class="ph"><span>🧭 Trends — where each trend started, why, and where it ended (saved)</span><span class="flt" id="trk-tflt"></span></div>
+      <div class="ex">સતત એક જ દિશામાં ચાલતા strikes/stocks. <b>Started from</b> = ક્યાંથી શરૂ થયો, <b>Confirmed</b> = alert ક્યારે આવ્યો, <b>Ended</b> = ક્યાં પૂરો થયો. <b>Max pull-back</b> = વચ્ચે સૌથી મોટો ઘટાડો.</div>
+      <div class="tw"><table id="trk-trends"></table></div>
+    </div>
+  </section>
+
+  <!-- 📊 All stocks (screener) -->
+  <section class="trk-pg" data-pg="stocks">
+    <div class="panel">
+      <div class="ph"><span>📊 All F&amp;O stocks — totals &amp; OI mapping (front expiry)</span>
+        <span style="display:flex;gap:6px;align-items:center"><input id="trk-find" placeholder="આ table માં શોધો…" class="trk-in">
+        <span class="hl-badge">header ક્લિક = ક્રમ · row ક્લિક = Option Chain</span></span></div>
+      <div class="ex">બધા F&amp;O stocks એક જ table માં. Header પર ક્લિક = તે ખાના પ્રમાણે ક્રમ (▼ મોટાથી નાનું). <b>Resist/Support</b> = સૌથી વધુ CE/PE OI વાળો strike. <b>Max pain</b> = expiry એ option ખરીદનારને સૌથી વધુ નુકસાન થાય તે ભાવ.</div>
+      <div class="tw"><table id="trk-sum"></table></div>
+    </div>
+  </section>
+
+  <!-- 🗓️ Multi-day OI -->
+  <section class="trk-pg" data-pg="multiday">
+    <div class="panel">
+      <div class="ph"><span>🗓️ Multi-day OI (NSE bhavcopy) — where OI keeps building, same activity day after day</span>
+        <span style="display:flex;gap:6px;align-items:center"><span class="hl-badge" id="trk-hist-st"></span><span class="flt" id="trk-hwin"></span></span></div>
+      <div class="ex">NSE ના છેલ્લા દિવસોના data પરથી: કયા stock માં OI દિવસો સુધી સતત વધે છે. <b>Streak ▲5d</b> = 5 દિવસથી OI વધે છે. <b>Same activity</b> = એક જ પ્રકારનું buildup કેટલા દિવસથી.</div>
+      <div class="tw"><table id="trk-hist"></table></div>
+    </div>
+  </section>
+
+  <!-- 🌍 FII / DII · deals -->
+  <section class="trk-pg" data-pg="market">
     <div class="panel">
       <div class="ph"><span>🌍 FII / DII / Pro / Client positions (NSE participant OI)</span><span class="hl-badge" id="trk-part-date"></span></div>
       <div class="ex">મોટા ખેલાડીઓ (FII, DII, Pro, Client) futures/options માં net <b>long (+)</b> છે કે <b>short (−)</b>. નીચેનો નાનો આંકડો = ગઈકાલથી ફેરફાર. FII index futures long % 30 નીચે = મંદીનું વલણ.</div>
-      <div style="max-height:30vh;overflow:auto"><table id="trk-part"></table></div>
-      <div class="ph" style="border-top:1px solid var(--bd)"><span>💼 Bulk / Block deals (F&amp;O stocks)</span><span class="hl-badge" id="trk-deal-date"></span></div>
-      <div style="max-height:22vh;overflow:auto"><table id="trk-deals"></table></div>
+      <div class="tw"><table id="trk-part"></table></div>
     </div>
     <div class="panel">
-      <div class="ph"><span>🗺️ Sector heatmap</span><span class="hl-badge">tile colour = average stock move · click a stock → ladder</span></div>
+      <div class="ph"><span>💼 Bulk / Block deals (F&amp;O stocks)</span><span class="hl-badge" id="trk-deal-date"></span></div>
+      <div class="ex">મોટા રોકાણકારોએ એક જ દિવસે કરેલા મોટા સોદા. BUY લીલું, SELL ગુલાબી.</div>
+      <div class="tw"><table id="trk-deals"></table></div>
+    </div>
+  </section>
+
+  <!-- 🗺️ Sectors -->
+  <section class="trk-pg" data-pg="sectors">
+    <div class="panel">
+      <div class="ph"><span>🗺️ Sector heatmap</span><span class="hl-badge">tile colour = average stock move · click a stock → Option Chain</span></div>
       <div class="ex">દરેક ખાનું એક sector. <b>ઘાટું લીલું</b> = sector ના stocks સરેરાશ વધુ વધ્યા, <b>ઘાટું ગુલાબી</b> = વધુ ઘટ્યા. ▲/▼ = કેટલા stocks વધ્યા/ઘટ્યા.</div>
-      <div id="trk-sec" style="padding:8px;display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px;max-height:54vh;overflow:auto"></div>
+      <div id="trk-sec" style="padding:10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px"></div>
     </div>
-  </div>
-  <div class="trk-grid">
+  </section>
+
+  <!-- ⚙️ Settings -->
+  <section class="trk-pg" data-pg="settings">
     <div class="panel">
-      <div class="ph"><span>🚨 Alerts — premium / OI / volume spike vs news</span><span class="flt" id="trk-flt"></span></div>
-      <div class="ex">કોઈ option નો ભાવ, OI કે volume અચાનક ઉછળે ત્યારે alert. <b>Why</b> = કારણ, નીચે = કયા strikes અને કેટલો ફેરફાર, અને તે stock ના news.</div>
-      <div id="trk-alerts" style="padding:8px;max-height:58vh;overflow:auto"></div>
+      <div class="ph"><span>⚙️ Settings</span><button class="tg" onclick="trkSave()">Save</button></div>
+      <div class="ex">Alert ક્યારે આવે તેના નિયમો. બદલીને <b>Save</b> દબાવો. <b>Provider</b> હંમેશાં <b>auto</b> અથવા <b>dhan_rest</b> રાખો (<b>dhan</b> = 5 WebSocket, bot disconnect થાય).</div>
+      <div class="trk-set" id="trk-set"></div>
+      <div id="trk-set-msg" style="padding:0 12px 10px;color:var(--mut)"></div>
     </div>
     <div class="panel">
-      <div class="ph"><span>📈 Top strikes</span><span class="flt" id="trk-msort"></span></div>
-      <div class="ex">બધા 25,000 strikes માંથી ટોચના 60. ઉપરના બટનથી ક્રમ બદલો: ભાવ ફેરફાર, હાલનું volume, OI ફેરફાર, Vol/OI (અસામાન્ય સોદા) કે IV.</div>
-      <div style="max-height:58vh;overflow:auto"><table id="trk-movers"></table></div>
+      <div class="ph"><span>⬇ Excel / CSV download · 📱 Telegram</span></div>
+      <div style="padding:10px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="flt" id="trk-exp-btns"></span>
+        <button class="tg" onclick="trkTgTest()" title="send a test message to your Telegram">📱 Telegram test</button></div>
     </div>
-  </div>
-  <div class="panel" style="margin:0 12px 8px">
-    <div class="ph"><span>🧭 Trends — where each trend started, why, and where it ended (saved)</span><span class="flt" id="trk-tflt"></span></div>
-    <div class="ex">સતત એક જ દિશામાં ચાલતા strikes/stocks. <b>Started from</b> = ક્યાંથી શરૂ થયો, <b>Confirmed</b> = alert ક્યારે આવ્યો, <b>Ended</b> = ક્યાં પૂરો થયો. <b>Max pull-back</b> = વચ્ચે સૌથી મોટો ઘટાડો.</div>
-    <div style="max-height:40vh;overflow:auto"><table id="trk-trends"></table></div>
-  </div>
-  <div class="panel" style="margin:0 12px 8px">
-    <div class="ph"><span>🗓️ Multi-day OI (NSE bhavcopy) — where OI keeps building, same activity day after day</span>
-      <span style="display:flex;gap:6px;align-items:center"><span class="hl-badge" id="trk-hist-st"></span><span class="flt" id="trk-hwin"></span></span></div>
-    <div class="ex">NSE ના છેલ્લા દિવસોના data પરથી: કયા stock માં OI દિવસો સુધી સતત વધે છે. <b>Streak ▲5d</b> = 5 દિવસથી OI વધે છે. <b>Same activity</b> = એક જ પ્રકારનું buildup કેટલા દિવસથી.</div>
-    <div style="max-height:34vh;overflow:auto"><table id="trk-hist"></table></div>
-  </div>
-  <div class="panel" style="margin:0 12px 8px">
-    <div class="ph"><span>📊 All F&amp;O stocks — totals &amp; OI mapping (front expiry)</span>
-      <span style="display:flex;gap:6px;align-items:center"><input id="trk-find" placeholder="search…" style="background:var(--bg);color:var(--txt);border:1px solid var(--bd);border-radius:4px;font-size:11px;padding:2px 6px;width:110px">
-      <span class="hl-badge">click a header to sort · a row → ladder</span></span></div>
-    <div class="ex">બધા F&amp;O stocks એક જ table માં. Header પર ક્લિક = તે ખાના પ્રમાણે ક્રમ (▼ મોટાથી નાનું). <b>Resist/Support</b> = સૌથી વધુ CE/PE OI વાળો strike. <b>Max pain</b> = expiry એ option ખરીદનારને સૌથી વધુ નુકસાન થાય તે ભાવ.</div>
-    <div style="max-height:34vh;overflow:auto"><table id="trk-sum"></table></div>
-  </div>
-  <div class="panel" style="margin:0 12px 8px">
-    <div class="ph"><span id="trk-lad-title">Strike ladder</span>
-      <span style="display:flex;gap:6px;align-items:center">
-        <select id="trk-sym" class="trk-sel"></select><select id="trk-exp" class="trk-sel"></select>
-        <span class="hl-badge">Strikes:</span><span class="flt" id="trk-rng"></span>
-        <button class="tg" onclick="trkChart('', TRK_SYM)">📈 Stock chart</button></span></div>
-    <div class="ex">એક stock ની આખી option chain. ડાબે <b class="ce">CE</b>, વચ્ચે Strike, જમણે <b class="pe">PE</b>. OI ખાનાની રંગીન પટ્ટી = OI ની દીવાલ. <span class="sr sr-R">R</span> = resistance, <span class="sr sr-S">S</span> = support. <b>Strikes</b> બટનથી ATM ની આસપાસ કેટલા strikes દેખાડવા તે પસંદ કરો.</div>
-    <div style="max-height:52vh;overflow:auto"><table id="trk-ladder"></table></div>
-    <div class="ph" style="border-top:1px solid var(--bd)"><span id="trk-sd-title">🗓️ Day-by-day record</span></div>
-    <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:8px;padding:0 8px">
-      <div style="max-height:30vh;overflow:auto"><table id="trk-sdays"></table></div>
-      <div style="max-height:30vh;overflow:auto"><table id="trk-sbuild"></table></div>
+  </section>
+
+  <!-- 📘 Help -->
+  <section class="trk-pg" data-pg="help">
+    <div class="panel">
+      <div class="ph"><span>📘 આ tracker કેવી રીતે વાંચવો? (રંગ, ▲▼, LB/SB/SC/LU નો અર્થ)</span></div>
+      <div class="g trk-help-g">
+        <div><b class="up">▲ લીલું</b> = ભાવ / OI વધ્યો · <b class="down">▼ લાલ/ગુલાબી</b> = ઘટ્યો. બધા % ની આગળ તીર છે.</div>
+        <div><b class="ce">CE</b> = Call (લીલું) · <b class="pe">PE</b> = Put (ગુલાબી). Option Chain માં ડાબે CE, વચ્ચે Strike, જમણે PE.</div>
+        <div><span class="bu bu-LB">LB</span> Long buildup = ભાવ ↑ + OI ↑ (નવા ખરીદનાર, તેજી)</div>
+        <div><span class="bu bu-SB">SB</span> Short buildup = ભાવ ↓ + OI ↑ (નવા વેચનાર, મંદી)</div>
+        <div><span class="bu bu-SC">SC</span> Short covering = ભાવ ↑ + OI ↓ (વેચનાર બહાર નીકળે, ઝડપી ઉછાળો)</div>
+        <div><span class="bu bu-LU">LU</span> Long unwinding = ભાવ ↓ + OI ↓ (ખરીદનાર બહાર નીકળે)</div>
+        <div><span class="sr sr-R">R</span> Resistance = સૌથી વધુ CE OI વાળો strike · <span class="sr sr-S">S</span> Support = સૌથી વધુ PE OI વાળો strike</div>
+        <div>OI ખાનામાં રંગીન પટ્ટી = એ strike નું OI, સૌથી મોટા OI ની સરખામણીમાં (લાંબી પટ્ટી = મોટી દીવાલ).</div>
+        <div>આછો પીળો = In-the-money · ઘાટો પીળો = ATM (spot ની સૌથી નજીક).</div>
+        <div><b class="vw-up">VWAP લીલું</b> = ભાવ VWAP ઉપર (ખરીદી મજબૂત) · <b class="vw-dn">લાલ</b> = નીચે.</div>
+        <div>● = live ભાવ · <b class="up">H</b>/<b class="down">L</b> = દિવસના high/low પર · <b style="color:var(--warn)">★</b> = all-time high ની 3% અંદર · ↗↘ = trend ચાલુ.</div>
+        <div>PCR = Put OI ÷ Call OI (1 થી ઉપર = put વધુ, ઘણી વાર support). IV Rank 70+ = option મોંઘા, 30 નીચે = સસ્તા.</div>
+        <div>કોઈ પણ ભાવ પર માઉસ રાખો = IV, greeks, bid/ask, history. ક્લિક = chart. Stock પર ક્લિક = તેની Option Chain.</div>
+        <div><b>NEWS-MATCH</b> = move સાથે news મળ્યા · <b>UNEXPLAINED</b> = news વગર move (ધ્યાન આપો) · <b>NEWS-AFTER</b> = news પાછળથી આવ્યા.</div>
+        <div>ઉપરનું <b>🔍 Stock શોધો</b> = નામ લખી Enter, સીધી તે stock ની Option Chain. <b>▲ UP / ▼ DOWN</b> = દરેક table માં ફક્ત વધતા / ઘટતા.</div>
+        <div><b>A− / A+</b> = અક્ષર નાના / મોટા. છેલ્લે ખોલેલું tab અને અક્ષરનું માપ યાદ રહે છે. <b>Display only</b>: આ tracker ક્યારેય order મૂકતો નથી.</div>
+      </div>
     </div>
-    <div class="ph" style="border-top:1px solid var(--bd)"><span>📰 News (24h)</span></div>
-    <div class="trk-news" id="trk-news" style="padding:4px 10px;max-height:22vh;overflow:auto"></div>
-  </div>
-  <div class="panel" style="margin:0 12px 16px">
-    <div class="ph"><span>⚙️ Settings</span><button class="tg" onclick="trkSave()">Save</button></div>
-    <div class="trk-set" id="trk-set"></div>
-    <div id="trk-set-msg" style="padding:0 10px 8px;font-size:11px;color:var(--mut)"></div>
-  </div>
+  </section>
 </div>
 <div id="trk-modal" class="trk-modal" onclick="if(event.target===this)trkClose()">
   <div class="trk-modal-box">
@@ -563,7 +659,8 @@ function setTab(t){
   $('tab-analysis').style.display= t==='analysis'?'':'none';
   $('tab-tracker').style.display = t==='tracker'?'':'none';
   if(t==='analysis') renderAnalysis();
-  if(t==='tracker') { trkSettings(); renderTracker(); }
+  if(t==='tracker') trkGo(TRK_PG);
+  else if(location.hash.startsWith('#trk=')) history.replaceState(null,'',location.pathname);
 }
 const rs=n=>{n=Math.round(n||0);return (n<0?'-':'')+'₹'+Math.abs(n).toLocaleString('en-IN');};
 async function renderAnalysis(){
@@ -714,7 +811,28 @@ async function trkSave(){
   const r=await fetch('/api/tracker/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   $('trk-set-msg').textContent=r.error?('❌ '+r.error):('✅ saved '+new Date().toLocaleTimeString()); trkSettings();
 }
-function trkPickSym(s){ if(s!==TRK_SYM){TRK_SYM=s; TRK_EXP='';} $('trk-sym').value=s; renderLadder(); renderStockHist(); }
+// ---- sub-tabs (one section per page, remembered; #trk=chain links work too) ----
+let TRK_PG=(location.hash.match(/trk=(\w+)/)||[])[1]||localStorage.getItem('trkPg')||'home';
+function trkGo(pg){
+  if(!document.querySelector(`.trk-pg[data-pg="${pg}"]`)) pg='home';
+  TRK_PG=pg; localStorage.setItem('trkPg',pg);
+  document.querySelectorAll('.trk-pg').forEach(s=>s.classList.toggle('on',s.dataset.pg===pg));
+  document.querySelectorAll('#trk-nav button').forEach(b=>b.classList.toggle('on',b.dataset.pg===pg));
+  if(TAB==='tracker'){ history.replaceState(null,'','#trk='+pg); window.scrollTo({top:0}); }
+  if(pg==='settings') trkSettings();
+  if(typeof renderTracker==='function' && TAB==='tracker') renderTracker();
+}
+document.querySelectorAll('#trk-nav button').forEach(b=>b.onclick=()=>trkGo(b.dataset.pg));
+trkGo(TRK_PG);                                            // mark the remembered section (renders once the tab opens)
+if(location.hash.startsWith('#trk=')) setTimeout(()=>setTab('tracker'),0);   // a #trk=… link opens the tracker
+// stock search: type a name + Enter (or pick from the list) -> that stock's option chain
+$('trk-go').addEventListener('keydown',e=>{ if(e.key==='Enter') trkFind(); });
+$('trk-go').addEventListener('change',trkFind);
+function trkFind(){ const v=($('trk-go').value||'').trim().toUpperCase(); if(!v) return;
+  const opts=[...$('trk-syms').options].map(o=>o.value);
+  const hit=opts.includes(v)?v:opts.find(s=>s.startsWith(v))||opts.find(s=>s.includes(v));
+  if(hit){ $('trk-go').value=''; trkPickSym(hit); } else { $('trk-go').style.borderColor='var(--sell)'; setTimeout(()=>$('trk-go').style.borderColor='',1200); } }
+function trkPickSym(s){ if(s!==TRK_SYM){TRK_SYM=s; TRK_EXP='';} $('trk-sym').value=s; if(TRK_PG!=='chain') trkGo('chain'); else renderLadder(); renderStockHist(); }
 $('trk-sym').onchange=e=>trkPickSym(e.target.value);
 $('trk-exp').onchange=e=>{TRK_EXP=e.target.value; renderLadder();};
 $('trk-find').oninput=()=>renderSummary();
@@ -860,9 +978,39 @@ async function renderSectors(){
     <div class="m">▲${o.up} ▼${o.down} · ${o.stocks} stocks · fut LB ${o.fut_lb}/SB ${o.fut_sb}${o.alerts?` · 🚨${o.alerts}`:''}<br>
     ${o.members.filter(m=>udOk(m.chg_pct)).slice(0,8).map(m=>`<span onclick="trkPickSym('${esc(m.symbol)}')">${esc(m.symbol)} ${m.chg_pct==null?'':arw(m.chg_pct)+(m.chg_pct>0?'+':'')+m.chg_pct+'%'}</span>`).join(' · ')}</div></div>`).join('');
 }
+function alertHtml(a){
+    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.opt==='FUT'?'futures':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${arw(l.pct)}${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
+    const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
+    const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
+    return `<div class="trk-alert ${esc(a.status)}">
+      <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
+        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span>
+          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})}
+          <span class="hl-badge"><b class="${a.dir==='UP'?'up':'down'}">${a.dir==='UP'?'▲':'▼'}</b> ${a.max_pct||''} · spot ${a.spot??'--'}${a.expiry?' · exp '+esc(a.expiry):''}</span></span>
+        <span class="hl-badge">${esc(a.time)}</span></div>
+      <div class="why"><b>Why:</b> ${esc(a.reason||'')}</div>${fa}
+      ${legs?`<div style="margin-top:4px">${legs}</div>`:''}
+      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:(a.status==='INFO'?'':'<div class="hl-badge" style="margin-top:4px">no news for this stock in the window — re-checked for the next hour</div>')}
+    </div>`;
+}
+async function renderDash(){
+  const s=TRK_SUM.filter(r=>r.chg_pct!=null);
+  const row=r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b> ${ctxBadges(r)}</td><td>${nf(r.spot)}</td><td>${pc(r.chg_pct)}</td><td>${bu(r.fut_buildup)}</td><td>${r.pcr??'--'}</td><td class="pe">${r.resistance??'--'}</td><td class="ce">${r.support??'--'}</td></tr>`;
+  const hd='<thead><tr><th>Stock</th><th>Spot</th><th>Chg %</th><th>Fut act.</th><th>PCR</th><th>Resist</th><th>Support</th></tr></thead>';
+  const up=s.filter(r=>r.chg_pct>0).sort((a,b)=>b.chg_pct-a.chg_pct).slice(0,10), dn=s.filter(r=>r.chg_pct<0).sort((a,b)=>a.chg_pct-b.chg_pct).slice(0,10);
+  $('dash-up').innerHTML=hd+'<tbody>'+(up.map(row).join('')||'<tr><td colspan="7" class="hl-badge">હજી data નથી</td></tr>')+'</tbody>';
+  $('dash-dn').innerHTML=hd+'<tbody>'+(dn.map(row).join('')||'<tr><td colspan="7" class="hl-badge">હજી data નથી</td></tr>')+'</tbody>';
+  const [al,tr]=await Promise.all([j('/api/tracker/alerts?limit=8'+(TRK_UD?'&dir='+TRK_UD:'')),j('/api/tracker/trends?limit=10&status=RUNNING')]);
+  $('dash-al').innerHTML=(al.alerts||[]).map(a=>`<div class="dal" onclick="trkPickSym('${esc(a.symbol)}')"><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span> <b>${esc(a.symbol)}</b> <b class="${a.dir==='UP'?'up':'down'}">${a.dir==='UP'?'▲':'▼'}</b> <span class="hl-badge">${esc((a.time||'').slice(11,16))}</span><div class="why">${esc((a.reason||'').slice(0,140))}${(a.reason||'').length>140?'…':''}</div></div>`).join('')||'<div class="hl-badge">હજી alert નથી</div>';
+  const t=(tr.trends||[]).filter(x=>!TRK_UD||x.dir===TRK_UD);
+  $('dash-tr').innerHTML='<thead><tr><th>What</th><th>Dir</th><th>Since</th><th>Move %</th></tr></thead><tbody>'+(t.map(x=>`<tr onclick="trkPickSym('${esc(x.symbol)}')"><td><b>${esc(x.symbol)}</b> ${x.opt==='STOCK'?'stock':`<span class="${x.opt==='CE'?'ce':'pe'}">${x.strike}${x.opt}</span>`}</td><td class="${x.dir==='UP'?'up':'down'}">${x.dir==='UP'?'▲ UP':'▼ DOWN'}</td><td>${esc(x.started_time||'')}</td><td>${pc(x.move_pct)}</td></tr>`).join('')||'<tr><td colspan="4" class="hl-badge">હજી કોઈ trend ચાલુ નથી</td></tr>')+'</tbody>';
+}
 async function renderTracker(){
   const st=await j('/api/tracker/status');
   $('trk-upd').innerHTML=`🔄 updated ${new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'})} · ${st.active?'<span class="up">● live</span>':'<span class="hl-badge">paused (market closed)</span>'}`;
+  $('cnt-alerts').textContent=st.alerts_today||''; $('cnt-trends').textContent=st.trends_running||'';
+  const P=TRK_PG;
+  if(P==='home'){
   const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
     ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
@@ -870,42 +1018,33 @@ async function renderTracker(){
     ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
     ['Trends', `${st.trends_running||0} running`, `${st.trends_today||0} today · IV/greeks on ${nf(st.greeks)} strikes`],
     ['Alerts today', st.alerts_today, `re-centred ${st.last_rebalance||'--'} · new strikes ${st.new_strikes_today}`],
-    ['History · context', st.history?'<span style="font-size:12px">'+esc(st.history)+'</span>':'--', st.context?`F&O ban ${esc(st.context.ban_date||'')}: ${esc((st.context.ban||[]).join(', ')||'none')}`:''],
+    ['History · context', st.history?'<span style="font-size:.6em">'+esc(st.history)+'</span>':'--', st.context?`F&O ban ${esc(st.context.ban_date||'')}: ${esc((st.context.ban||[]).join(', ')||'none')}`:''],
     ['News', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
     ['Telegram', st.telegram&&st.telegram.enabled?'<span class="up">ON</span>':'<span class="hl-badge">off</span>', st.telegram&&st.telegram.enabled?`${st.telegram.sent} sent${st.telegram.error?' · <span class="down">'+esc(st.telegram.error)+'</span>':''}`:'add telegram.json to enable'],
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
    + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
-
-  const al=(await j('/api/tracker/alerts?limit=100'+(TRK_FLT?'&status='+TRK_FLT:'')+(TRK_UD?'&dir='+TRK_UD:''))).alerts||[];
-  $('trk-alerts').innerHTML=al.length?al.map(a=>{
-    const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.opt==='FUT'?'futures':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
-    const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
-    const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
-    return `<div class="trk-alert ${esc(a.status)}">
-      <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
-        <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span>
-          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})}
-          <span class="hl-badge">${a.dir==='UP'?'▲':'▼'} ${a.max_pct||''} · spot ${a.spot??'--'}${a.expiry?' · exp '+esc(a.expiry):''}</span></span>
-        <span class="hl-badge">${esc(a.time)}</span></div>
-      <div class="why"><b>Why:</b> ${esc(a.reason||'')}</div>${fa}
-      ${legs?`<div style="margin-top:4px">${legs}</div>`:''}
-      ${nw?`<div class="trk-news" style="margin-top:4px">${nw}</div>`:(a.status==='INFO'?'':'<div class="hl-badge" style="margin-top:4px">no news for this stock in the window — re-checked for the next hour</div>')}
-    </div>`}).join(''):`<div style="color:var(--mut);font-size:12px;padding:8px">No alerts yet.</div>`;
-
-  const mvSign=r=>TRK_MSORT==='oi'?r.oi_chg_pct:TRK_MSORT==='move'?r.chg_win_pct:(r.chg_pct??r.chg_win_pct);
-  const mv=(await j('/api/tracker/board?limit=60&sort='+TRK_MSORT+(TRK_UD?'&sign='+TRK_UD:''))).rows||[];
-  $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>Vol/OI</th><th>OI chg%</th><th>Act.</th><th>IV</th></tr></thead><tbody>`+
-    mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')" title="${tip(r)}"><td>${esc(r.symbol)}</td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
-      <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${r.vol_oi??'--'}</td><td>${pc(r.oi_chg_pct)}</td><td>${bu(r.buildup)}</td><td>${r.iv??'--'}</td></tr>`).join('')+'</tbody>';
-
+  }
+  if(P==='alerts'){
+    const al=(await j('/api/tracker/alerts?limit=100'+(TRK_FLT?'&status='+TRK_FLT:'')+(TRK_UD?'&dir='+TRK_UD:''))).alerts||[];
+    $('trk-alerts').innerHTML=al.length?al.map(alertHtml).join(''):`<div style="color:var(--mut);padding:8px">No alerts yet.</div>`;
+  }
+  if(P==='movers'){
+    const mv=(await j('/api/tracker/board?limit=60&sort='+TRK_MSORT+(TRK_UD?'&sign='+TRK_UD:''))).rows||[];
+    $('trk-movers').innerHTML=`<thead><tr><th>Stock</th><th>Strike</th><th>LTP</th><th>VWAP</th><th>Move%</th><th>Vol (win)</th><th>Vol/OI</th><th>OI chg%</th><th>Act.</th><th>IV</th></tr></thead><tbody>`+
+      mv.map(r=>`<tr onclick="trkChart('${esc(r.key)}')" title="${tip(r)}"><td><b style="cursor:pointer" onclick="event.stopPropagation();trkPickSym('${esc(r.symbol)}')">${esc(r.symbol)}</b></td><td class="${r.opt==='CE'?'ce':'pe'}">${r.strike}${r.opt}${r.front?'':' <span class=hl-badge>'+esc(r.expiry.slice(5))+'</span>'}</td>
+        <td>${r.ltp??'--'}</td><td class="${r.above_vwap?'vw-up':r.above_vwap===false?'vw-dn':''}">${r.vwap??'--'}</td><td>${pc(r.chg_win_pct)}</td><td>${nf(r.vol_win)}</td><td>${r.vol_oi??'--'}</td><td>${pc(r.oi_chg_pct)}</td><td>${bu(r.buildup)}</td><td>${r.iv??'--'}</td></tr>`).join('')
+      +(mv.length?'':'<tr><td colspan="10" class="hl-badge" style="padding:14px">હજી કોઈ strike ચાલ્યો નથી (market બંધ હોય ત્યારે ભાવ/volume બદલાતા નથી). OI change, Vol/OI કે IV બટન અજમાવો.</td></tr>')+'</tbody>';
+  }
   const slow=Date.now()-TRK_SLOW_T>15000;               // heavy tables refresh every 15 s, not every 5 s
-  if(slow||!TRK_SUM.length){ TRK_SLOW_T=Date.now(); TRK_SUM=(await j('/api/tracker/summary')).stocks||[]; renderSummary(); }
+  if(slow||!TRK_SUM.length){ TRK_SLOW_T=Date.now(); TRK_SUM=(await j('/api/tracker/summary')).stocks||[]; }
+  if(P==='stocks') renderSummary();
   const syms=(await j('/api/tracker/symbols')).symbols||[];
   const first=!TRK_SYM;
   if(!TRK_SYM && syms.length) TRK_SYM=syms.includes('RELIANCE')?'RELIANCE':syms[0];
-  if($('trk-sym').options.length!==syms.length) $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join('');
+  if($('trk-sym').options.length!==syms.length){ $('trk-sym').innerHTML=syms.map(s=>`<option>${esc(s)}</option>`).join(''); $('trk-syms').innerHTML=syms.map(s=>`<option value="${esc(s)}">`).join(''); }
   $('trk-sym').value=TRK_SYM;
-  await Promise.all([renderLadder(), slow?renderTrends():null, renderHistory(), renderMarket(), slow?renderSectors():null, first?renderStockHist():null]);
+  await Promise.all([P==='home'?renderDash():null, P==='chain'?renderLadder():null, P==='chain'&&(first||!$('trk-sdays').innerHTML)?renderStockHist():null,
+    P==='trends'?renderTrends():null, P==='multiday'?renderHistory():null, P==='market'?renderMarket():null, P==='sectors'?renderSectors():null]);
 }
 // ---- chart: candles + VWAP + volume + OI ----
 $('trk-ch-tf').innerHTML=['1','5','15','60'].map(v=>`<button data-v="${v}" class="${v==='1'?'on':''}">${v}m</button>`).join('');
