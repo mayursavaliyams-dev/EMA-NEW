@@ -75,6 +75,7 @@ class NewsHub:
         self._sym_nse_last = {}       # symbol -> ts of last per-symbol fetch
         self._gnews = {}              # symbol -> (ts, [items])
         self.errors = {}              # source -> last error text (shown on dashboard)
+        self._ext = {}                # id -> item from other feeds (Dhan Pro news with sentiment)
 
     # ---------------- NSE ----------------
     def _nse_fetch(self, symbol=None):
@@ -164,9 +165,31 @@ class NewsHub:
                 self.errors["Google News"] = str(e)[:200]
         return list(cached[1]) if cached else []
 
+    # ---------------- other feeds (Dhan Pro) ----------------
+    def add_external(self, items):
+        cutoff = (datetime.now(IST) - self.keep).timestamp()
+        with self._lock:
+            for it in items:
+                self._ext[it["id"]] = it
+            for k in [k for k, v in self._ext.items() if v["ts"] < cutoff]:
+                del self._ext[k]
+
+    def ext_for(self, symbol):
+        symbol = symbol.upper()
+        with self._lock:
+            return [v for v in self._ext.values() if v["symbol"] == symbol]
+
+    def latest_ext(self, symbols=None, limit=100):
+        with self._lock:
+            items = list(self._ext.values())
+        if symbols is not None:
+            items = [i for i in items if i["symbol"] in symbols]
+        items.sort(key=lambda i: i["ts"], reverse=True)
+        return items[:limit]
+
     # ---------------- combined ----------------
     def news_for(self, symbol, name, since_ts=None, until_ts=None, fetch=True):
-        items = self.nse_for(symbol, fetch) + self.gnews_for(symbol, name, fetch)
+        items = self.nse_for(symbol, fetch) + self.gnews_for(symbol, name, fetch) + self.ext_for(symbol)
         if since_ts is not None:
             items = [i for i in items if i["ts"] >= since_ts]
         if until_ts is not None:

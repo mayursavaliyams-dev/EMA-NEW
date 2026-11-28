@@ -80,7 +80,7 @@
   .trk-alert{background:var(--card);border:1px solid var(--bd);border-left:3px solid var(--mut);border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:12px}
   .trk-alert.NEWS-MATCH{border-left-color:var(--buy)} .trk-alert.UNEXPLAINED{border-left-color:var(--warn)} .trk-alert.NEWS-AFTER{border-left-color:var(--blue)}
   .badge{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700}
-  .b-NEWS-MATCH{background:rgba(0,245,212,.12);color:var(--buy)} .b-UNEXPLAINED{background:rgba(255,214,10,.12);color:var(--warn)} .b-NEWS-AFTER{background:rgba(41,98,255,.18);color:#8fa8ff}
+  .b-NEG{background:rgba(247,37,133,.14);color:var(--sell)} .b-NEWS-MATCH{background:rgba(0,245,212,.12);color:var(--buy)} .b-UNEXPLAINED{background:rgba(255,214,10,.12);color:var(--warn)} .b-NEWS-AFTER{background:rgba(41,98,255,.18);color:#8fa8ff}
   .trk-news a{color:var(--txt);text-decoration:none} .trk-news a:hover{text-decoration:underline}
   .trk-news div{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:11px}
   .trk-set{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:6px;padding:10px;font-size:11px}
@@ -200,6 +200,20 @@
     <div class="panel">
       <div class="ph"><span>📈 Top strikes</span><span class="flt" id="trk-msort"></span></div>
       <div style="max-height:58vh;overflow:auto"><table id="trk-movers"></table></div>
+    </div>
+  </div>
+  <div class="trk-grid" style="grid-template-columns:1.1fr 1fr 1.2fr">
+    <div class="panel">
+      <div class="ph"><span>⭐ Dhan news · sentiment</span><span class="flt" id="pro-nflt"></span></div>
+      <div class="trk-news" id="pro-news" style="padding:6px 10px;max-height:46vh;overflow:auto"></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><span>⭐ Dhan market movers</span><select id="pro-mset" class="trk-sel"></select></div>
+      <div style="max-height:46vh;overflow:auto"><table id="pro-movers"></table></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><span>⭐ Technical (Dhan) · every F&amp;O stock</span><span class="flt" id="pro-tflt"></span></div>
+      <div style="max-height:46vh;overflow:auto"><table id="pro-tech"></table></div>
     </div>
   </div>
   <div class="panel" style="margin:0 12px 8px">
@@ -611,7 +625,7 @@ let TRK_FLT='', TRK_SYM='', TRK_EXP='', TRK_MSORT='move', TRK_SORT='vol', TRK_DE
 let TRK_TFLT='', TRK_HWIN=5, TRK_HIST=[], TRK_HT=0, TRK_UD='', TRK_SLOW_T=0, TRK_NEWS_SYM='', TRK_NEWS_T=0;
 // UP/DOWN row filter: keep a row when its signed value matches the chosen side (rows without a value are hidden while filtering)
 const udOk=v=>!TRK_UD||(v!=null&&(TRK_UD==='UP'?v>0:v<0));
-const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan_rest/dhan/upstox)',trkDhanRestPerSec:'Dhan REST calls/sec (max 1)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
+const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan_rest/dhan/upstox)',trkDhanRestPerSec:'Dhan REST calls/sec (max 1)',trkProEnabled:'Dhan Pro (news/movers/technical)',trkProNewsSec:'Dhan news every (sec)',trkProMoversSec:'Dhan movers every (sec)',trkProTechMin:'Technical every (min)',trkProTechTf:'Technical candle (1/5/15, 0=daily)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
   trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
   trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkVolOiRatio:'Unusual: Vol/OI ×',
   trkIvSpikePts:'IV spike (pts)',trkIvWindowMin:'IV window (min)',trkTrendBarMin:'Trend candle (min)',trkTrendMinBars:'Trend warm-up candles',trkTrendGreen:'Trend: candles in a row',
@@ -647,17 +661,19 @@ const ctxBadges=r=>(r.ban?'<span class="ctx" title="F&O ban — no fresh positio
   (r.event?`<span class="bu bu-SC" title="${esc(r.event.purpose)} ${esc(r.event.date)}">📅 ${r.event.days===0?'today':r.event.days+'d'}</span>`:'');
 function renderSummary(){
   const f=($('trk-find').value||'').toUpperCase();
-  const cols=[['symbol','Stock'],['spot','Spot'],['chg_pct','Chg %'],['stock_trend','Trend'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['ce_buildup','CE act.'],
+  const cols=[['symbol','Stock'],['spot','Spot'],['chg_pct','Chg %'],['stock_trend','Trend'],['tech','Tech (Dhan)'],['rsi','RSI'],['ce_oi','CE OI'],['pe_oi','PE OI'],['pcr','PCR'],['ce_oi_chg','CE OI chg'],['ce_buildup','CE act.'],
     ['pe_oi_chg','PE OI chg'],['pe_buildup','PE act.'],['fut_basis_pct','Fut basis %'],['fut_oi_chg_pct','Fut OI chg %'],['fut_buildup','Fut act.'],['rollover_pct','Rollover %'],
     ['vol','Volume'],['atm_iv','ATM IV'],['iv_rank','IV Rank'],['iv_pctile','IV %ile'],['iv_term','IV term (next−front)'],['skew','Skew (P−C IV)'],
     ['max_pain','Max pain'],['exp_move_pct','Exp. move ±%'],['gex_cr','GEX ₹cr/1%'],['gex_flip','Gamma flip'],['deliv_pct','Deliv %'],['deliv_x20','Deliv ×20d'],['deals','Deals'],['sector','Sector'],['resistance','Resist (max CE OI)'],['support','Support (max PE OI)'],['max_vol_strike','Max vol strike'],
     ['mwpl_pct','MWPL %'],['alerts','Alerts'],['trends','Trends']];
-  const rows=TRK_SUM.filter(r=>(!f||r.symbol.includes(f))&&udOk(r.chg_pct)).map(r=>({...r,vol:r.ce_vol+r.pe_vol}));
+  const rows=TRK_SUM.filter(r=>(!f||r.symbol.includes(f))&&udOk(r.chg_pct)).map(r=>{const t=TRK_TECH[r.symbol]||{};
+    return {...r,vol:r.ce_vol+r.pe_vol,rsi:t.RSI_14??null,tech:t.trend?(t.trend.startsWith('UP')?1:t.trend.startsWith('DOWN')?-1:0)*(t.ADX_14||1):null};});
   const val=(r,k)=>k==='stock_trend'?(r.stock_trend?(r.stock_trend.dir==='UP'?1:-1)*Math.abs(r.stock_trend.move_pct||0):null):r[k];
   rows.sort((a,b)=>{const x=val(a,TRK_SORT),y=val(b,TRK_SORT);const c=(typeof x==='string'||typeof y==='string')?String(x??'').localeCompare(String(y??'')):(x??-1e18)-(y??-1e18);return TRK_DESC?-c:c;});
   $('trk-sum').innerHTML=`<thead><tr>${cols.map(([k,l])=>`<th onclick="TRK_DESC=TRK_SORT===\'${k}\'?!TRK_DESC:true;TRK_SORT=\'${k}\';renderSummary()">${l}${TRK_SORT===k?(TRK_DESC?' ▼':' ▲'):''}</th>`).join('')}</tr></thead><tbody>`+
     rows.map(r=>`<tr onclick="trkPickSym('${esc(r.symbol)}')"><td><b>${esc(r.symbol)}</b> ${ctxBadges(r)}</td><td>${nf(r.spot)}</td><td>${pc(r.chg_pct)}</td>
       <td>${r.stock_trend?`<span class="${r.stock_trend.dir==='UP'?'up':'down'}" title="since ${esc(r.stock_trend.since)}">${r.stock_trend.dir==='UP'?'▲':'▼'} ${r.stock_trend.since}</span>`:'--'}</td>
+      <td>${techTag(TRK_TECH[r.symbol])||'--'}</td><td>${rsiC(r.rsi)}</td>
       <td class="ce">${nf(r.ce_oi)}</td><td class="pe">${nf(r.pe_oi)}</td><td>${r.pcr??'--'}</td><td>${sg(r.ce_oi_chg)}</td><td>${bu(r.ce_buildup)}</td><td>${sg(r.pe_oi_chg)}</td><td>${bu(r.pe_buildup)}</td>
       <td>${pc(r.fut_basis_pct)}</td><td>${pc(r.fut_oi_chg_pct)}</td><td>${bu(r.fut_buildup)}</td><td>${r.rollover_pct??'--'}</td>
       <td>${nf(r.vol)}</td><td>${r.atm_iv??'--'}</td><td>${ivr(r.iv_rank)}${r.iv_extreme?` <span class="ctx" title="IV outside its ${'stored'} history">${r.iv_extreme==='NEW HIGH'?'▲':'▼'}</span>`:''}</td><td>${r.iv_pctile??'--'}</td><td>${sg(r.iv_term)}</td><td>${r.skew??'--'}</td>
@@ -685,7 +701,8 @@ async function renderLadder(){
   const fr=(TRK_SUM.find(x=>x.symbol===TRK_SYM)||{});
   const futTxt=fr.fut_ltp!=null?` · FUT ${nf(fr.fut_ltp)} (basis ${fr.fut_basis_pct>0?'+':''}${fr.fut_basis_pct??'--'}%, OI ${fr.fut_oi_chg_pct>0?'+':''}${fr.fut_oi_chg_pct??'--'}% ${bu(fr.fut_buildup)}, rollover ${fr.rollover_pct??'--'}%)`:'';
   const anTxt=` · max pain ${fr.max_pain??'--'} · exp. range ${fr.exp_lo??'--'}–${fr.exp_hi??'--'} · IV rank ${fr.iv_rank??'--'}`;
-  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'}${futTxt}${anTxt} <span class="hl-badge">hover a price → IV/greeks/bid-ask/history · click → chart · ● live · H/L at day high/low · ★ near all-time high · ↗↘ trend running</span>`;
+  const tk=TRK_TECH[TRK_SYM]; const tkTxt=tk?` · ${techTag(tk)} RSI ${rsiC(tk.RSI_14)} ADX ${tk.ADX_14??'--'}`:'';
+  $('trk-lad-title').innerHTML=`Strike ladder · <b>${esc(TRK_SYM)}</b> spot ${nf(spot)} · ATM ${atm??'--'}${futTxt}${anTxt}${tkTxt} <span class="hl-badge">hover a price → IV/greeks/bid-ask/history · click → chart · ● live · H/L at day high/low · ★ near all-time high · ↗↘ trend running</span>`;
   const cell=(r,side)=>{ if(!r||!r.key) return '<td colspan="10">--</td>';
     const vw=r.vwap!=null?`<span class="${r.above_vwap?'vw-up':'vw-dn'}">${r.vwap}</span>`:'--';
     const hl=r.range_pos==null?'':r.range_pos>=98?' <b class="up" title="at day high">H</b>':r.range_pos<=2?' <b class="down" title="at day low">L</b>':'';
@@ -701,7 +718,7 @@ async function renderLadder(){
   if(TRK_NEWS_SYM===TRK_SYM && Date.now()-TRK_NEWS_T<60000) return;   // news: on symbol change or once a minute
   TRK_NEWS_SYM=TRK_SYM; TRK_NEWS_T=Date.now();
   const nw=(await j('/api/tracker/news?symbol='+encodeURIComponent(TRK_SYM))).items||[];
-  $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div><span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
+  $('trk-news').innerHTML=nw.length?nw.slice(0,30).map(n=>`<div>${SENT_B(n.sentiment)} <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(5,16).replace('T',' '))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join(''):'<div class="hl-badge">no news in 24h</div>';
 }
 async function renderStockHist(){
   if(!TRK_SYM) return;
@@ -749,6 +766,60 @@ const EXPORTS=[['alerts','Alerts'],['trends','Trends'],['summary','All stocks'],
 $('trk-exp-btns').innerHTML=EXPORTS.map(([w,l])=>`<button onclick="location.href='/api/tracker/export?what=${w}&fmt=xlsx'" title="download ${l} as Excel (.xlsx)">${l}</button>`).join(' ')
   +` <button onclick="location.href='/api/tracker/export?what=alerts&fmt=csv'" title="alerts as CSV">CSV</button>`;
 async function trkTgTest(){ const r=await fetch('/api/tracker/telegram/test',{method:'POST'}).then(r=>r.json()); alert(r.error?('Telegram: '+r.error):'Telegram: test message sent ✅'); }
+// ---- Dhan Pro: news with sentiment, market movers, technical ----
+let TRK_PRO={news:[],movers:{},technical:[],status:null}, TRK_TECH={}, PRO_T=0, PRO_NF='', PRO_MSET='', PRO_TF='', PRO_TS='rsi', PRO_TD=true;
+const SENT_B=s=>s==='POSITIVE'?'<span class="badge b-NEWS-MATCH" title="Dhan sentiment">🟢 POS</span>':s==='NEGATIVE'?'<span class="badge b-NEG" title="Dhan sentiment">🔴 NEG</span>':s?'<span class="hl-badge" title="Dhan sentiment">⚪ NEU</span>':'';
+const techTag=t=>!t||!t.trend?'':`<span class="${t.trend.startsWith('UP')?'up':t.trend.startsWith('DOWN')?'down':'hl-badge'}" title="Dhan technical (${esc(t.tf)}${t.tf==='D'?'':'m'} candles, ${esc(t.time)}): RSI ${t.RSI_14??'--'} · ADX ${t.ADX_14??'--'} · EMA20 ${t.EMA_20??'--'} · EMA50 ${t.EMA_50??'--'} · ATR ${t.ATR_14??'--'}">${t.trend.startsWith('UP')?'▲':t.trend.startsWith('DOWN')?'▼':'↔'} ${esc(t.trend)}</span>`;
+const rsiC=v=>v==null?'--':`<span style="color:${v>=70?'var(--sell)':v<=30?'var(--buy)':'var(--txt)'}" title="${v>=70?'overbought':v<=30?'oversold':''}">${v}</span>`;
+function withTrend(a){ const t=TRK_TECH[a.symbol]; if(!t||!t.trend||t.trend==='SIDE') return '';
+  const ok=(a.dir==='UP')===t.trend.startsWith('UP');
+  return ok?'<span class="badge b-NEWS-MATCH" title="alert direction matches the Dhan technical trend">✓ with trend</span>':'<span class="badge b-NEG" title="alert direction is against the Dhan technical trend">✗ vs trend</span>'; }
+$('pro-nflt').innerHTML=[['','All'],['POSITIVE','🟢 Pos'],['NEGATIVE','🔴 Neg']].map(([v,l])=>`<button data-v="${v}" class="${v===''?'on':''}">${l}</button>`).join('');
+$('pro-nflt').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('pro-nflt').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));PRO_NF=b.dataset.v;renderProNews();});
+$('pro-tflt').innerHTML=[['','All'],['UP','▲ Up'],['DOWN','▼ Down'],['OB','RSI≥70'],['OS','RSI≤30']].map(([v,l])=>`<button data-v="${v}" class="${v===''?'on':''}">${l}</button>`).join('');
+$('pro-tflt').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('pro-tflt').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));PRO_TF=b.dataset.v;renderProTech();});
+$('pro-mset').onchange=e=>{PRO_MSET=e.target.value;renderProMovers();};
+function renderProNews(){
+  const st=TRK_PRO.status||{}; const err=(st.errors||{}).news;
+  const nw=(TRK_PRO.news||[]).filter(n=>!PRO_NF||n.sentiment===PRO_NF);
+  $('pro-news').innerHTML=(err?`<div class="down" style="font-size:11px">⚠ ${esc(err)}</div>`:'')+(nw.length?nw.slice(0,120).map(n=>`<div style="margin-bottom:4px">${SENT_B(n.sentiment)}
+     <b style="cursor:pointer" onclick="trkPickSym('${esc(n.symbol)}')">${esc(n.symbol)}</b> ${techTag(TRK_TECH[n.symbol])}
+     <span class="hl-badge">${esc((n.time||'').slice(5,16).replace('T',' '))} · ${esc(n.category||'')}</span><br>${esc(n.title)}
+     ${n.summary?`<div class="hl-badge" style="white-space:normal">${esc(n.summary.slice(0,220))}</div>`:''}</div>`).join('')
+    :`<div class="hl-badge">${st.available===false?'needs dhan.json (Dhan Pro plan)':'no Dhan news yet'}</div>`);
+}
+function renderProMovers(){
+  const st=TRK_PRO.status||{}; const err=(st.errors||{}).movers; const sets=Object.keys(TRK_PRO.movers||{});
+  if(!PRO_MSET||!sets.includes(PRO_MSET)) PRO_MSET=sets[0]||'';
+  $('pro-mset').innerHTML=sets.map(k=>`<option ${k===PRO_MSET?'selected':''}>${esc(k)}</option>`).join('');
+  const m=(TRK_PRO.movers||{})[PRO_MSET]; const rows=m?m.rows:[];
+  const opt=m&&m.instrument==='OPTSTK', fut=m&&m.instrument==='FUTSTK';
+  $('pro-movers').innerHTML=(err?`<caption class="down" style="font-size:11px">⚠ ${esc(err)}</caption>`:'')+
+    `<thead><tr><th>#</th><th>Instrument</th><th>LTP</th><th>Chg %</th>${opt||fut?'<th>OI</th><th>OI chg %</th>':''}<th>Volume</th>${fut?'<th>Prem %</th>':''}<th>Trend</th></tr></thead><tbody>`+
+    (rows.length?rows.map(r=>{ const sym=(r.symbol||'').split(/[ -]/)[0];
+      return `<tr onclick="trkPickSym('${esc(sym)}')" style="cursor:pointer"><td>${r.rank}</td><td style="white-space:nowrap"><b>${esc(r.symbol)}</b>${r.strike&&!String(r.symbol).includes(String(r.strike))?` <span class="hl-badge">${r.strike}</span>`:''}</td>
+      <td>${r.ltp??'--'}</td><td>${pc(r.chg_pct)}</td>${opt||fut?`<td>${nf(r.oi)}</td><td>${pc(r.oi_chg_pct)}</td>`:''}<td>${nf(r.volume)}</td>${fut?`<td>${pc(r.prem_pct)}</td>`:''}<td>${techTag(TRK_TECH[sym])}</td></tr>`;}).join('')
+     :`<tr><td colspan="9" class="hl-badge">${st.available===false?'needs dhan.json (Dhan Pro plan)':'waiting for Dhan market movers'}${m?' · '+esc(m.time):''}</td></tr>`)+'</tbody>'+
+    (m?`<caption class="hl-badge" style="caption-side:bottom">${esc(m.category)}${m.expiry?' · exp '+esc(m.expiry):''} · ${esc(m.time)}</caption>`:'');
+}
+function renderProTech(){
+  const st=TRK_PRO.status||{}; const err=(st.errors||{}).technical;
+  const key={rsi:'RSI_14',adx:'ADX_14',atr:'ATR_14',macd:'MACD_HIST'};
+  let rows=(TRK_PRO.technical||[]).filter(t=>!PRO_TF||(PRO_TF==='UP'?(t.trend||'').startsWith('UP'):PRO_TF==='DOWN'?(t.trend||'').startsWith('DOWN'):PRO_TF==='OB'?t.RSI_14>=70:t.RSI_14<=30));
+  rows.sort((a,b)=>{const k=key[PRO_TS]; const c=PRO_TS==='sym'?a.symbol.localeCompare(b.symbol):(a[k]??-1e9)-(b[k]??-1e9); return PRO_TD?-c:c;});
+  const th=(k,l)=>`<th onclick="PRO_TD=PRO_TS==='${k}'?!PRO_TD:true;PRO_TS='${k}';renderProTech()">${l}${PRO_TS===k?(PRO_TD?' ▼':' ▲'):''}</th>`;
+  $('pro-tech').innerHTML=(err?`<caption class="down" style="font-size:11px">⚠ ${esc(err)}</caption>`:'')+
+    `<thead><tr>${th('sym','Stock')}<th>Trend</th>${th('rsi','RSI')}${th('adx','ADX')}<th>Price</th><th>EMA20</th><th>EMA50</th>${th('atr','ATR')}${th('macd','MACD h')}<th>At</th></tr></thead><tbody>`+
+    (rows.length?rows.map(t=>`<tr onclick="trkPickSym('${esc(t.symbol)}')" style="cursor:pointer"><td><b>${esc(t.symbol)}</b></td><td>${techTag(t)}</td><td>${rsiC(t.RSI_14)}</td><td>${t.ADX_14??'--'}</td>
+      <td>${t.price??'--'}</td><td>${t.EMA_20??'--'}</td><td>${t.EMA_50??'--'}</td><td>${t.ATR_14??'--'}</td><td>${sg(t.MACD_HIST)}</td><td class="hl-badge">${esc(t.time||'')}</td></tr>`).join('')
+     :`<tr><td colspan="10" class="hl-badge">${st.available===false?'needs dhan.json (Dhan Pro plan)':'first pass runs every few minutes (218 stocks)'}</td></tr>`)+'</tbody>';
+}
+async function renderPro(){
+  if(Date.now()-PRO_T<30000) return; PRO_T=Date.now();
+  TRK_PRO=await j('/api/tracker/pro');
+  TRK_TECH={}; (TRK_PRO.technical||[]).forEach(t=>TRK_TECH[t.symbol]=t);
+  renderProNews(); renderProMovers(); renderProTech();
+}
 let TRK_MKT_T=0;
 async function renderMarket(){
   if(Date.now()-TRK_MKT_T<60000) return; TRK_MKT_T=Date.now();
@@ -773,16 +844,20 @@ async function renderSectors(){
     ${o.members.filter(m=>udOk(m.chg_pct)).slice(0,8).map(m=>`<span onclick="trkPickSym('${esc(m.symbol)}')">${esc(m.symbol)} ${m.chg_pct==null?'':(m.chg_pct>0?'+':'')+m.chg_pct+'%'}</span>`).join(' · ')}</div></div>`).join('');
 }
 async function renderTracker(){
+  await renderPro().catch(()=>{});
   const st=await j('/api/tracker/status');
   const prov=st.provider?st.provider.toUpperCase():'--';
   $('trk-cards').innerHTML=[
     ['Tracked strikes', `${nf(st.instruments_tracked)} / ${nf(st.budget)}`, `${st.stocks_tracked} of ${st.stocks_in_master} F&O stocks · ${st.per_stock[0]}-${st.per_stock[1]} legs each`],
     ['Provider · live ticks', `${prov} · ${nf(st.instruments_live)}`, `+${st.underlyings_live||0} stocks +${st.futures_live||0} futures · `+esc(st.feed)+(st.dhan_error?` · <span class="down">${esc(st.dhan_error)}</span>`:'')],
-    ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`:'all strikes streaming'],
+    ['Updates', nf(st.ticks), st.provider==='upstox'?`REST snapshot every ${st.rest_every_sec??'--'}s (last ${st.last_rest||'--'})`
+       :st.provider==='dhan_rest'?`Dhan REST · full refresh every ${st.rest_every_sec??'--'}s · ${nf(st.rest_polls)} passes · ${nf((st.dhan_rest||{}).calls)} calls${(st.dhan_rest||{}).rate_limited?` · <span class="down">${st.dhan_rest.rate_limited} rate-limited</span>`:''} · 0 WebSocket`:'all strikes streaming'],
     ['Trends', `${st.trends_running||0} running`, `${st.trends_today||0} today · IV/greeks on ${nf(st.greeks)} strikes`],
     ['Alerts today', st.alerts_today, `re-centred ${st.last_rebalance||'--'} · new strikes ${st.new_strikes_today}`],
     ['History · context', st.history?'<span style="font-size:12px">'+esc(st.history)+'</span>':'--', st.context?`F&O ban ${esc(st.context.ban_date||'')}: ${esc((st.context.ban||[]).join(', ')||'none')}`:''],
     ['News', Object.keys(st.news_errors||{}).length?'<span class="down">⚠</span>':'<span class="up">OK</span>', esc(Object.entries(st.news_errors||{}).map(([k,v])=>k+': '+v).join(' | ')||'NSE + Google News')],
+    ['Dhan Pro', st.pro&&st.pro.available?(Object.keys(st.pro.errors||{}).length?'<span class="down">⚠</span>':'<span class="up">ON</span>'):'<span class="hl-badge">off</span>',
+       st.pro&&st.pro.available?`news ${st.pro.news} · movers ${st.pro.movers} · technical ${st.pro.technical}`+(Object.keys(st.pro.errors||{}).length?' · <span class="down">'+esc(Object.entries(st.pro.errors).map(([k,v])=>k+': '+v).join(' | '))+'</span>':''):'add dhan.json (Pro plan) to enable'],
     ['Telegram', st.telegram&&st.telegram.enabled?'<span class="up">ON</span>':'<span class="hl-badge">off</span>', st.telegram&&st.telegram.enabled?`${st.telegram.sent} sent${st.telegram.error?' · <span class="down">'+esc(st.telegram.error)+'</span>':''}`:'add telegram.json to enable'],
   ].map(([l,v,sub])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub||''}</div></div>`).join('')
    + (Object.keys(st.errors||{}).length?`<div class="kpi" style="grid-column:1/-1"><div class="l">Errors</div><div class="s down">${esc(JSON.stringify(st.errors))}</div></div>`:'');
@@ -790,12 +865,12 @@ async function renderTracker(){
   const al=(await j('/api/tracker/alerts?limit=100'+(TRK_FLT?'&status='+TRK_FLT:'')+(TRK_UD?'&dir='+TRK_UD:''))).alerts||[];
   $('trk-alerts').innerHTML=al.length?al.map(a=>{
     const legs=a.legs.map(l=>`<span style="font-family:var(--mono);font-size:10px;cursor:pointer" class="${l.opt==='CE'?'ce':l.opt==='PE'?'pe':''}" onclick="trkChart('${esc(l.key)}')" title="${esc(l.reason||'')}">${l.opt==='STOCK'?'stock':l.opt==='FUT'?'futures':l.strike+l.opt} ${['VOLUME','UNUSUAL'].includes(a.kind)?`${nf(l.to)} vs ${nf(l.from)} (${l.pct}×)`:a.kind==='IV'?`IV ${l.from}→${l.to}`:`${nf(l.from)}→${nf(l.to)} (${l.pct>0?'+':''}${l.pct}%)`}${l.vwap?` · vwap ${l.vwap}`:''}${l.iv?` · iv ${l.iv}`:''} ${bu(l.buildup)}</span>`).join(' · ');
-    const nw=(a.news||[]).map(n=>`<div>• <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
+    const nw=(a.news||[]).map(n=>`<div>• ${SENT_B(n.sentiment)} <span class="hl-badge">${esc(n.source)} ${esc((n.time||'').slice(11,16))}</span> <a href="${safeUrl(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a></div>`).join('');
     const fa=a.first_alert&&a.first_alert.time&&a.first_alert.time!==a.time.slice(11)?`<div class="hl-badge">first alert today ${esc(a.first_alert.time)} (${esc(KIND[a.first_alert.kind]||a.first_alert.kind)})</div>`:'';
     return `<div class="trk-alert ${esc(a.status)}">
       <div style="display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap">
         <span><span class="badge b-${esc(a.status)}">${esc(a.status)}</span> <span class="badge b-VOLUME">${esc(KIND[a.kind]||a.kind)}</span>
-          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})}
+          <b style="cursor:pointer" onclick="trkPickSym('${esc(a.symbol)}')">${esc(a.symbol)}</b> ${ctxBadges(a.context||{})} ${techTag(TRK_TECH[a.symbol])} ${withTrend(a)}
           <span class="hl-badge">${a.dir==='UP'?'▲':'▼'} ${a.max_pct||''} · spot ${a.spot??'--'}${a.expiry?' · exp '+esc(a.expiry):''}</span></span>
         <span class="hl-badge">${esc(a.time)}</span></div>
       <div class="why"><b>Why:</b> ${esc(a.reason||'')}</div>${fa}

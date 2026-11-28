@@ -112,6 +112,8 @@ def options_analytics(symbol: str = "NIFTY"):
     symbol = symbol.upper()
     if symbol not in config.SYMBOLS:
         return JSONResponse({"error": "unknown symbol"}, status_code=400)
+    if not config.access_token():
+        return {"error": "no Upstox token (token.json)"}
     return analytics(symbol)
 
 
@@ -120,6 +122,8 @@ def options_chain(symbol: str = "NIFTY"):
     symbol = symbol.upper()
     if symbol not in config.SYMBOLS:
         return JSONResponse({"error": "unknown symbol"}, status_code=400)
+    if not config.access_token():
+        return {"error": "no Upstox token (token.json)"}
     meta = config.SYMBOLS[symbol]
     exps = [e for e in conn.expiries(meta["key"]) if e >= datetime.now(IST).strftime("%Y-%m-%d")]
     expiry = exps[0]
@@ -136,6 +140,8 @@ def api_candles(symbol: str = "NIFTY", interval: str = "5"):
     symbol = symbol.upper()
     if symbol not in config.SYMBOLS:
         return JSONResponse({"error": "unknown symbol"}, status_code=400)
+    if not config.access_token():
+        return {"symbol": symbol, "interval": interval, "candles": [], "error": "no Upstox token (token.json)"}
     return {"symbol": symbol, "interval": interval,
             "candles": conn.candles(config.SYMBOLS[symbol]["key"], interval)}
 
@@ -383,7 +389,22 @@ def tracker_news(symbol: str = "", hours: float = 24):
         _news_refresh(sym, s.get("name", sym))
         return {"items": news_hub.news_for(sym, s.get("name", sym), since_ts=since, fetch=False)}
     fo = set(tracker.u.stocks) or None
-    return {"items": [i for i in news_hub.latest_nse(fo) if i["ts"] >= since]}
+    items = news_hub.latest_nse(fo) + news_hub.latest_ext(fo)
+    items.sort(key=lambda i: i["ts"], reverse=True)
+    return {"items": [i for i in items if i["ts"] >= since][:150]}
+
+
+@app.get("/api/tracker/pro")
+def tracker_pro(symbol: str = "", sentiment: str = "", hours: float = 24):
+    """Dhan Pro: news with sentiment, market movers, technical indicators (display only)."""
+    pro = tracker.pro
+    if not pro:
+        return {"status": None, "news": [], "movers": {}, "technical": []}
+    since = datetime.now(IST).timestamp() - hours * 3600
+    tech = [dict(v, symbol=k) for k, v in sorted(pro.tech.items())]
+    return {"status": pro.status(), "enabled": bool(config.cfg("trkProEnabled")),
+            "news": pro.news_list(symbol or None, since, sentiment or None),
+            "movers": dict(pro.movers), "technical": tech}
 
 
 @app.get("/api/tracker/settings")

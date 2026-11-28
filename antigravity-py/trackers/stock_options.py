@@ -32,6 +32,7 @@ from datetime import datetime, timezone, timedelta
 
 import config
 from trackers.providers import DhanProvider, DhanRestProvider, UpstoxProvider
+from trackers.dhan_pro import DhanPro
 from trackers.history import History, label as bu_label, LABELS
 from trackers.nse_context import NseContext
 from trackers.nse_extra import NseExtra
@@ -51,7 +52,12 @@ SETTINGS = {
                                 # "dhan" (5 WebSockets) only on request: it would disconnect a bot on the same Dhan id.
     "trkBudget": 25000,         # strikes to track (Dhan: all live; Upstox: 5000 live + rest via REST)
     "trkDhanConnections": 5,    # Dhan allows 5 WS connections x 5000 instruments
-    "trkDhanRestPerSec": 0.8,   # dhan_rest: market-quote calls/sec (Dhan cap 1/sec per account; 1000 instruments each)
+    "trkDhanRestPerSec": 0.8,
+    "trkProEnabled": True,      # Dhan Pro plan: news with sentiment, market movers, technical indicators
+    "trkProNewsSec": 60,        # Dhan news poll (latest 50 headlines)
+    "trkProMoversSec": 120,     # Dhan market movers poll (9 lists)
+    "trkProTechMin": 5,         # technical indicators for every F&O stock, every N minutes
+    "trkProTechTf": 15,         # candle for indicators: 1 / 5 / 15 minutes, 0 = daily   # dhan_rest: market-quote calls/sec (Dhan cap 1/sec per account; 1000 instruments each)
     "trkSpikePct": 20,          # premium move % ...
     "trkWindowMin": 5,          # ... within this many minutes
     "trkMinPremium": 2,         # ignore options cheaper than ₹ (noise)
@@ -429,7 +435,8 @@ def _fmt(v):
 
 
 class StockOptionsTracker:
-    def __init__(self, conn, news, universe=None, detector=None, providers=None, history=None, context=None, extra=None):
+    def __init__(self, conn, news, universe=None, detector=None, providers=None, history=None, context=None, extra=None,
+                 pro=None):
         self.conn, self.news = conn, news
         self.u = universe or Universe()
         self.det = detector or Detector()
@@ -440,6 +447,9 @@ class StockOptionsTracker:
         self.hist = history if history is not None else History(days=setting("trkHistDays"))
         self.ctx = context if context is not None else NseContext()
         self.extra = extra if extra is not None else NseExtra()
+        self.pro = pro if pro is not None else DhanPro(self._dhan_creds)
+        self._pro_sid = {}                # symbol -> Dhan security id (for technical data)
+        self._pro_sid_day = None
         self.anal = {}                    # symbol -> live analytics (max pain, GEX, skew, expected move, IV rank)
         self._seen_deals = set()
         self.tg = Telegram()
@@ -509,6 +519,75 @@ class StockOptionsTracker:
         for i in range(3):               # parallel news lookups (Google News / NSE are ~1 s each)
             threading.Thread(target=self._news_loop, name=f"trk-news-{i}", daemon=True).start()
         threading.Thread(target=self._slow_loop, name="trk-slow", daemon=True).start()
+        if self.pro:
+            threading.Thread(target=self._pro_fast_loop, name="trk-pro", daemon=True).start()
+            threading.Thread(target=self._pro_tech_loop, name="trk-pro-tech", daemon=True).start()
+
+    # ---------------- Dhan Pro (news / movers / technical) ----------------
+    def _dhan_creds(self):
+        for name in ("dhan_rest", "dhan"):
+            p = self.providers.get(name)
+            if p is not None and hasattr(p, "creds"):
+                return p.creds()
+        return {}
+
+    def pro_on(self):
+        return bool(self.pro) and bool(setting("trkProEnabled")) and self.active() and self.pro.available()
+
+    def pro_expiries(self):
+        with self._lock:
+            opt = sorted({m["expiry"] for m in self.sel.values() if m.get("front") and m.get("expiry")})
+            fut = sorted({m["expiry"] for m in self.fut_meta.values() if m.get("front") and m.get("expiry")})
+        return (opt[0] if opt else None), (fut[0] if fut else None)
+
+    def pro_sids(self):
+        """{symbol: Dhan security id}. Dhan providers carry them in the underlying key; on Upstox the
+        Dhan master is read once a day just for this map."""
+        if self.p is not None and self.p.name.startswith("dhan"):
+            return {sym: s["underlying_key"].split("|", 1)[1] for sym, s in self.u.stocks.items()
+                    if s["underlying_key"].startswith("NSE_EQ|")}
+        day = now_ist().strftime("%Y-%m-%d")
+        if self._pro_sid_day != day and "dhan_rest" in self.providers:
+            self._pro_sid_day = day
+            try:
+                rows = self.providers["dhan_rest"].load_rows()
+                self._pro_sid = {r["symbol"]: r["underlying_key"].split("|", 1)[1] for r in rows}
+            except Exception as e:
+                self.stats["errors"]["pro_master"] = f"{type(e).__name__}: {e}"[:200]
+        return {s: self._pro_sid[s] for s in self.u.stocks if s in self._pro_sid}
+
+    def pro_prices(self):
+        return {sym: self.spots.get(s["underlying_key"]) for sym, s in self.u.stocks.items()}
+
+    def pro_news_once(self):
+        items = self.pro.poll_news(set(self.u.stocks) or None)
+        add = getattr(self.news, "add_external", None)
+        if add and items:
+            add(items)
+        return items
+
+    def _pro_fast_loop(self):
+        t_news = t_mov = 0.0
+        while not self._stop.is_set():
+            if self.pro_on():
+                now = time.time()
+                if now - t_news >= setting("trkProNewsSec"):
+                    t_news = now
+                    self.pro_news_once()
+                if now - t_mov >= setting("trkProMoversSec"):
+                    t_mov = now
+                    self.pro.poll_movers(*self.pro_expiries())
+            self._stop.wait(5)
+
+    def _pro_tech_loop(self):
+        t = 0.0
+        while not self._stop.is_set():
+            if self.pro_on() and time.time() - t >= setting("trkProTechMin") * 60 and self.u.stocks:
+                t = time.time()
+                tf = setting("trkProTechTf")
+                self.pro.poll_technical(self.pro_sids(), self.pro_prices(), "D" if not tf else int(tf),
+                                        stop=lambda: self._stop.is_set() or not self.pro_on())
+            self._stop.wait(10)
 
     def active(self):
         return bool(setting("TRACKER_ENABLED")) and (setting("trkAlwaysOn") or market_window())
@@ -590,10 +669,10 @@ class StockOptionsTracker:
         if now - self._t_rebal > setting("trkRebalanceMin") * 60 or not self.sel:
             self._t_rebal = now
             self.rebalance()
-        if self.p.name == "dhan_rest":
+        if self.p.name == "dhan_rest" and isinstance(getattr(self.p, "stats", None), dict):
             ps = self.p.stats
-            self.stats["rest_every_sec"] = ps["last_cycle_sec"]
-            self.stats["rest_polls"] = ps["cycles"]
+            self.stats["rest_every_sec"] = ps.get("last_cycle_sec")
+            self.stats["rest_polls"] = ps.get("cycles", 0)
             if ps.get("last_error"):
                 self.stats["errors"]["dhan_rest"] = ps["last_error"]
         if self.p.name == "upstox":
@@ -1561,6 +1640,7 @@ class StockOptionsTracker:
                 "dhan_error": getattr(self.providers.get("dhan"), "fatal", None)
                 or getattr(self.providers.get("dhan_rest"), "fatal", None),
                 "dhan_rest": dict(self.providers["dhan_rest"].stats) if "dhan_rest" in self.providers else None,
+                "pro": self.pro.status() if self.pro else None,
                 "stocks_in_master": len(self.u.stocks), "stocks_tracked": len(per),
                 "instruments_tracked": n, "instruments_live": nl, "underlyings_live": len(self.ukeys),
                 "futures_live": len(self.fut_meta),

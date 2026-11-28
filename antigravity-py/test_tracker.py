@@ -556,6 +556,94 @@ def test_dhan_rest():
         srv.close()
 
 
+def test_dhan_pro():
+    """Dhan Pro: news with sentiment -> stock + news hub, movers, technical trend, plan-error backoff."""
+    import http.server
+    from trackers import dhan_pro as DP
+    from trackers.news import NewsHub
+    seen = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append((self.path, b, self.headers.get("access-token")))
+            code = 200
+            if self.path.endswith("/newsheadline"):
+                out = {"data": {"latestNews": [
+                    {"newsObject": {"overallSentiment": "POSITIVE", "title": "STK1 bags big order", "text": "t"},
+                     "category": "COMPANIES", "publishDate": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), "smSymbol": "STK1"},
+                    {"newsObject": {"overallSentiment": "NEGATIVE", "title": "NOTFNO falls", "text": ""},
+                     "category": "COMPANIES", "publishDate": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), "smSymbol": "NOTFNO"}]}}
+            elif self.path.endswith("/marketmovers"):
+                out = {"data": [{"securityId": "9", "tradingSymbol": "STK2", "instrument": b["instrument"][0], "ltp": 101.5,
+                                 "changePercent": 3.2, "volume": 5000, "openInterest": 70000, "openInterestChangePercent": 12.5}]}
+            else:
+                if b["securityId"] == "1003":
+                    code, out = 400, {"errorCode": "DH-902", "errorMessage": "This API requires a Pro Traders plan."}
+                else:
+                    out = {"securityId": b["securityId"], "data": {"RSI_14": {"value": 64.2}, "ADX_14": {"value": 28.0},
+                                                                    "EMA_20": {"value": 1290.0}, "EMA_50": {"value": 1270.0},
+                                                                    "ATR_14": 12.5, "MACD_HIST": {"value": 1.1}}}
+            raw = json.dumps(out).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        pro = DP.DhanPro(lambda: {"client_id": "1100", "access_token": "tok"}, api=f"http://127.0.0.1:{srv.server_address[1]}", per_sec=100)
+        fp = FakeProvider("dhan_rest", 26000)
+        hub = NewsHub()
+        t = T.StockOptionsTracker(None, hub, detector=T.Detector(get=lambda k: SET[k]), providers={"upstox": fp},
+                                  history=False, context=False, extra=False, pro=pro)
+        t.choose_provider()
+        t.u.build(fp.load_rows())
+        t.u.build_futures(fp.load_futures())
+        t.rebalance()
+        items = t.pro_news_once()
+        check("pro news: sentiment parsed, only F&O stocks kept",
+              len(items) == 1 and items[0]["symbol"] == "STK1" and items[0]["sentiment"] == "POSITIVE" and items[0]["sent"] == 1)
+        hn = hub.news_for("STK1", "STOCK 1 LIMITED", fetch=False)
+        check("pro news: merged into the news hub (alerts see it, with sentiment)",
+              any(i["source"] == "Dhan" and i["sentiment"] == "POSITIVE" for i in hn))
+        check("pro news: request = 50 latest, client id + token sent",
+              seen[0][1].get("limit") == 50 and seen[0][1].get("dhanClientId") == "1100" and seen[0][2] == "tok")
+        oe, fe = t.pro_expiries()
+        check("pro movers: front option + futures expiry from the tracked universe", bool(oe) and bool(fe), f"({oe}, {fe})")
+        n = pro.poll_movers(oe, fe)
+        mv = [b for p_, b, _ in seen if p_.endswith("/marketmovers")]
+        check("pro movers: 9 lists, expiry on F&O lists, FNO_STOCKS universe on equity",
+              n == 9 and len(pro.movers) == 9 and all(b.get("expiry") for b in mv if b["exchangeSegment"] == "NSE_FNO")
+              and all(b.get("universe") == "FNO_STOCKS" for b in mv if b["exchangeSegment"] == "NSE_EQ")
+              and pro.movers["Options · OI gainers"]["rows"][0]["oi_chg_pct"] == 12.5)
+        sids = t.pro_sids()
+        check("pro technical: Dhan security ids from the Dhan universe", len(sids) == 218 and sids["STK0"] == "1000")
+        sub = {k: sids[k] for k in ("STK0", "STK1", "STK2", "STK3", "STK4")}
+        n = pro.poll_technical(sub, {"STK0": 1300.0, "STK1": 1250.0, "STK2": 1280.0}, 15)
+        tk = pro.tech["STK0"]
+        check("pro technical: indicators parsed ({value} and bare numbers)",
+              tk["RSI_14"] == 64.2 and tk["ADX_14"] == 28.0 and tk["ATR_14"] == 12.5 and tk["tf"] == "15")
+        check("pro technical: trend label from price vs EMA20/EMA50 + ADX",
+              tk["trend"] == "UP" and pro.tech["STK1"]["trend"] == "SIDE" and pro.tech["STK2"]["trend"] == "SIDE"
+              and DP.trend_label(1200, {"EMA_20": 1250, "EMA_50": 1290, "ADX_14": 30}) == "DOWN")
+        check("pro: plan error (DH-902) reported and paused, not retried every stock",
+              n == 3 and "DH-902" in pro.errors.get("technical", "") and "STK4" not in pro.tech
+              and pro.backoff.get("technical", 0) > time.monotonic())
+        check("pro: status in /api/tracker/status", t.status()["pro"]["news"] == 1 and t.status()["pro"]["technical"] == 3)
+        check("pro: off when trkProEnabled is false", (SET.__setitem__("trkProEnabled", False) or not t.pro_on()))
+    finally:
+        SET["trkProEnabled"] = True
+        srv.shutdown()
+    check("pro: trend_label edge cases", DP.trend_label(None, {}) is None
+          and DP.trend_label(100, {"EMA_20": 99, "EMA_50": 98, "ADX_14": 10}) == "UP (weak)")
+
+
 def test_news_relevance():
     from trackers.news import is_relevant, clean_name
     check("clean_name drops LIMITED", clean_name("RELIANCE INDUSTRIES LIMITED") == "Reliance Industries")
@@ -914,7 +1002,7 @@ def test_board_fast_topn():
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
-               test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_dhan_rest, test_news_relevance,
+               test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_dhan_rest, test_dhan_pro, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
                test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_speed]:
         print(fn.__name__)
