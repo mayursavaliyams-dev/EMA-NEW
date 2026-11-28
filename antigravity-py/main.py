@@ -400,8 +400,8 @@ def tracker_settings_set(body: dict):
     for k, v in body.items():
         d = TRK_SETTINGS[k]
         if k == "trkProvider":
-            if str(v).lower() not in ("auto", "dhan", "upstox"):
-                return JSONResponse({"error": "trkProvider must be auto | dhan | upstox"}, status_code=400)
+            if str(v).lower() not in ("auto", "dhan_rest", "dhan", "upstox"):
+                return JSONResponse({"error": "trkProvider must be auto | dhan_rest | dhan | upstox"}, status_code=400)
             clean[k] = str(v).lower()
             continue
         try:
@@ -412,6 +412,11 @@ def tracker_settings_set(body: dict):
             return JSONResponse({"error": f"{k} must be >= 0"}, status_code=400)
     if "trkBudget" in clean:
         clean["trkBudget"] = min(clean["trkBudget"], 25000)
+    if "trkDhanRestPerSec" in clean:
+        clean["trkDhanRestPerSec"] = max(0.1, min(clean["trkDhanRestPerSec"], 1.0))   # Dhan: 1 quote call/sec
+        if hasattr(tracker.providers.get("dhan_rest"), "_rl_quote"):
+            from trackers.providers import _RateLimit
+            tracker.providers["dhan_rest"]._rl_quote = _RateLimit(clean["trkDhanRestPerSec"])
     if "trkDhanConnections" in clean:
         clean["trkDhanConnections"] = max(1, min(clean["trkDhanConnections"], 5))
     config.save_overrides(clean)

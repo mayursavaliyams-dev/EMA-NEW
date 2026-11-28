@@ -611,7 +611,7 @@ let TRK_FLT='', TRK_SYM='', TRK_EXP='', TRK_MSORT='move', TRK_SORT='vol', TRK_DE
 let TRK_TFLT='', TRK_HWIN=5, TRK_HIST=[], TRK_HT=0, TRK_UD='', TRK_SLOW_T=0, TRK_NEWS_SYM='', TRK_NEWS_T=0;
 // UP/DOWN row filter: keep a row when its signed value matches the chosen side (rows without a value are hidden while filtering)
 const udOk=v=>!TRK_UD||(v!=null&&(TRK_UD==='UP'?v>0:v<0));
-const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan/upstox)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
+const TRK_LBL={TRACKER_ENABLED:'Tracker on',trkProvider:'Provider (auto/dhan_rest/dhan/upstox)',trkDhanRestPerSec:'Dhan REST calls/sec (max 1)',trkBudget:'Strikes (max 25000)',trkDhanConnections:'Dhan connections (1-5)',
   trkSpikePct:'Spike %',trkWindowMin:'Spike window (min)',trkMinPremium:'Min premium ₹',trkMinAbsMove:'Min move ₹',trkOiPct:'OI change %',trkOiWindowMin:'OI window (min)',
   trkMinOiLots:'Min OI lots',trkVolMult:'Volume burst ×',trkVolWindowMin:'Volume window (min)',trkMinVolLots:'Min volume lots',trkVolOiRatio:'Unusual: Vol/OI ×',
   trkIvSpikePts:'IV spike (pts)',trkIvWindowMin:'IV window (min)',trkTrendBarMin:'Trend candle (min)',trkTrendMinBars:'Trend warm-up candles',trkTrendGreen:'Trend: candles in a row',
@@ -629,7 +629,7 @@ async function trkSettings(){
   const st=await j('/api/tracker/settings');
   $('trk-set').innerHTML=Object.entries(st).map(([k,v])=>typeof v==='boolean'
     ? `<label>${TRK_LBL[k]||k}<input type="checkbox" data-k="${k}" ${v?'checked':''} style="width:auto"></label>`
-    : k==='trkProvider' ? `<label>${TRK_LBL[k]}<select data-k="${k}" class="trk-sel">${['auto','dhan','upstox'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')}</select></label>`
+    : k==='trkProvider' ? `<label>${TRK_LBL[k]}<select data-k="${k}" class="trk-sel">${['auto','dhan_rest','dhan','upstox'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')}</select></label>`
     : typeof v==='string' ? `<label style="grid-column:span 2">${TRK_LBL[k]||k}<input type="text" data-k="${k}" value="${esc(v)}" style="width:100%"></label>`
     : `<label>${TRK_LBL[k]||k}<input type="number" step="any" min="0" data-k="${k}" value="${esc(v)}"></label>`).join('');
 }

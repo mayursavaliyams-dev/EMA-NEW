@@ -94,9 +94,15 @@ are context on the dashboard; they are not alpha. Do not assume the bot acts on 
 `antigravity-py/trackers/` — tab **🔎 Stock Options + News** on :8000. Never places orders and
 never feeds the strangle engine.
 
-- **Providers** (`trackers/providers.py`, setting `trkProvider` = auto | dhan | upstox):
-  - **Dhan** (used automatically when `antigravity-py/dhan.json` = `{"client_id": "...",
-    "access_token": "..."}` works): 5 WebSocket connections x 5000 = **25,000 strikes live** in
+- **Providers** (`trackers/providers.py`, setting `trkProvider` = auto | dhan_rest | dhan | upstox):
+  - **Dhan REST** (`dhan_rest`, the `auto` choice when `antigravity-py/dhan.json` =
+    `{"client_id": "...", "access_token": "..."}` works): all ~25,000 strikes + 218 stocks + 436
+    futures via `POST /marketfeed/quote` (1,000 instruments/request, paced `trkDhanRestPerSec` =
+    0.8 calls/s under Dhan's 1/s account cap), full refresh about every 33 s. Uses **0 WebSocket
+    connections**, so a trading bot on the same Dhan id keeps all 5 sockets (a 6th would
+    disconnect it with error 805). 429/RL001 is retried; an auth/plan error stops it and the
+    tracker falls back to Upstox.
+  - **Dhan WebSocket** (`dhan`, only when chosen explicitly): 5 WebSocket connections x 5000 = **25,000 strikes live** in
     FULL mode — LTP, VWAP (avg price), volume, OI, OI day high/low, prev OI, OHLC, buy/sell qty.
     Packet layouts follow Dhan's official SDK (dhanhq 2.3.0). An expired/invalid token (codes
     806-809) stops Dhan and the tracker falls back to Upstox.
@@ -147,7 +153,7 @@ never feeds the strangle engine.
   HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
   breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
   NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
-- **Test:** `py test_tracker.py` (offline, 107 checks incl. a WebSocket round-trip with a fake Dhan
+- **Test:** `py test_tracker.py` (offline, 121 checks incl. a WebSocket round-trip with a fake Dhan
   feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
 - Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 

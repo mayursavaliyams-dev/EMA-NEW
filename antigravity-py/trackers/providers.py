@@ -17,6 +17,8 @@ Two interchangeable providers expose the same small interface:
 DhanProvider   — DhanHQ v2. 5 WebSocket connections x 5000 = 25,000 instruments in FULL
                  mode (LTP, VWAP/avg price, volume, OI, OI day high/low, OHLC, buy/sell qty).
                  Packet layouts follow Dhan's official Python SDK (dhanhq 2.3.0, marketfeed.py).
+DhanRestProvider — DhanHQ v2 REST full quotes for all ~25,000 (1000/request, paced 0.8 req/s,
+                 full refresh ~33 s). ZERO WebSocket connections: safe beside a bot using Dhan's 5.
 UpstoxProvider — Upstox v3 (backup). 1 connection x 5000, 'ltpc' ticks + REST full quotes.
 """
 import os
@@ -432,6 +434,191 @@ class DhanProvider:
             if cb:
                 cb(key, f, now)
         return out
+
+
+# ======================================================================
+# Dhan REST (no WebSocket) — safe next to a bot that already holds all 5 Dhan sockets
+# ======================================================================
+class DhanRestProvider(DhanProvider):
+    """All ~25,000 instruments via Dhan REST full market quote (`POST /marketfeed/quote`).
+
+    Dhan: up to 1,000 instruments per request, 1 request/sec across all market-quote APIs
+    (account-wide). We pace at `per_sec` (default 0.8) so the remaining 20% is left for anything
+    else on the same account, and cycle through every subscribed key: ~26 calls -> one full refresh
+    every ~33 s. Uses ZERO WebSocket connections, so it can never trip Dhan's 5-connection limit
+    (error 805) and disconnect a trading bot on the same client id.
+
+    Fields per instrument: ltp, ltq, vwap (average_price), volume, oi, tbq/tsq, OHLC, prev_close
+    (ohlc.close = previous session close during market hours), 5-level depth (bid/ask + totals).
+    """
+    name = "dhan_rest"
+    PER_REQ = 1000
+    QUOTE_PATH = "/marketfeed/quote"
+    AUTH_FAIL = ("DH-901", "DH-902", "806", "807", "808", "809")
+
+    def __init__(self, per_sec=0.8, creds=None, api=None, limit=26000):
+        super().__init__(connections=1, creds=creds, api=api)
+        self.limit = int(limit)               # REST has no socket cap; 25,000 strikes + stocks + futures
+        self.per_sec = float(per_sec)
+        self._rl_quote = _RateLimit(self.per_sec)   # shared with spots() (/marketfeed/ltp)
+        self.keys = []
+        self.is_active = lambda: True         # tracker installs its market-hours check
+        self.stats = {"cycles": 0, "calls": 0, "instruments": 0, "last_cycle_sec": None,
+                      "rate_limited": 0, "errors": 0, "last_error": None}
+        self.state = "idle"
+        self._started = False
+
+    # ---- subscription = "the set of keys to poll" ----
+    def set_subscription(self, keys):
+        keys = sorted(set(list(keys)[:self.limit]))
+        with self._lock:
+            old = set(self.keys)
+            self.keys = keys
+        new = set(keys)
+        return {"added": len(new - old), "removed": len(old - new)}
+
+    def start_feed(self, on_data, on_status):
+        self.on_data, self.on_status = on_data, on_status
+        if not self._started:
+            self._started = True
+            threading.Thread(target=self._loop_forever, name="dhan-rest", daemon=True).start()
+
+    def status_text(self):
+        if self.fatal:
+            return f"Dhan REST stopped: {self.fatal}"
+        s = self.stats
+        cyc = f" · full refresh {s['last_cycle_sec']}s" if s["last_cycle_sec"] else ""
+        return (f"Dhan REST {self.state} · {len(self.keys)} instruments{cyc} · "
+                f"{s['calls']} calls · 0 WebSocket")
+
+    # ---- REST ----
+    @classmethod
+    def batches(cls, keys):
+        """Split keys into request bodies of <= 1000 instruments: [{"NSE_FNO": [ids], "NSE_EQ": [ids]}]."""
+        out = []
+        for i in range(0, len(keys), cls.PER_REQ):
+            body = {}
+            for k in keys[i:i + cls.PER_REQ]:
+                seg, sid = k.split("|", 1)
+                try:
+                    body.setdefault(seg, []).append(int(sid))
+                except ValueError:
+                    continue
+            if body:
+                out.append(body)
+        return out
+
+    @staticmethod
+    def _ltt(s):
+        try:
+            return int(datetime.strptime(s, "%d/%m/%Y %H:%M:%S").replace(tzinfo=IST).timestamp())
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def parse_quote(cls, data):
+        """Dhan full-quote JSON -> {key: fields} in the tracker vocabulary."""
+        out = {}
+        for seg, items in ((data or {}).get("data") or {}).items():
+            if not isinstance(items, dict):
+                continue
+            for sid, v in items.items():
+                if not isinstance(v, dict):
+                    continue
+                f = {}
+                lp = v.get("last_price")
+                if lp:
+                    f["ltp"] = round(float(lp), 2)
+                for src, dst in (("last_quantity", "ltq"), ("volume", "volume"), ("oi", "oi"),
+                                 ("buy_quantity", "tbq"), ("sell_quantity", "tsq")):
+                    if v.get(src) is not None:
+                        f[dst] = int(v[src])
+                if v.get("average_price"):
+                    f["vwap"] = round(float(v["average_price"]), 2)
+                o = v.get("ohlc") or {}
+                for src, dst in (("open", "open"), ("high", "high"), ("low", "low"), ("close", "prev_close")):
+                    if o.get(src):
+                        f[dst] = round(float(o[src]), 2)
+                t = cls._ltt(v.get("last_trade_time"))
+                if t:
+                    f["ltt"] = t
+                dp = v.get("depth") or {}
+                buy, sell = dp.get("buy") or [], dp.get("sell") or []
+                if buy and buy[0].get("price"):
+                    f["bid"], f["bid_qty"] = round(float(buy[0]["price"]), 2), int(buy[0].get("quantity") or 0)
+                if sell and sell[0].get("price"):
+                    f["ask"], f["ask_qty"] = round(float(sell[0]["price"]), 2), int(sell[0].get("quantity") or 0)
+                if buy or sell:
+                    f["depth_bid_qty"] = sum(int(x.get("quantity") or 0) for x in buy)
+                    f["depth_ask_qty"] = sum(int(x.get("quantity") or 0) for x in sell)
+                if f:
+                    out[f"{seg}|{sid}"] = f
+        return out
+
+    def _quote(self, body):
+        """One paced request; retries once after a rate-limit reply. Returns parsed {key: fields}."""
+        for attempt in range(3):
+            self._rl_quote.wait()
+            self.stats["calls"] += 1
+            r = self._http.post(self.API + self.QUOTE_PATH, headers=self._h(), json=body)
+            if r.status_code == 200:
+                return self.parse_quote(r.json())
+            txt = r.text[:300]          # error bodies only (a 200 body holds prices like 806.5)
+            if r.status_code == 429 or "RL001" in txt or "RATE_LIMIT" in txt:
+                self.stats["rate_limited"] += 1
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if r.status_code in (401, 403) or any(c in txt for c in self.AUTH_FAIL):
+                self.fatal = f"Dhan REST auth/plan error HTTP {r.status_code}: {txt[:120]}"
+                self._status()
+                return {}
+            raise RuntimeError(f"Dhan {self.QUOTE_PATH} HTTP {r.status_code}: {txt[:160]}")
+        raise RuntimeError("Dhan rate limit (RL001) persisted after retries")
+
+    def poll(self, keys):
+        """Snapshot of `keys` (used only on demand; the background cycle feeds on_data)."""
+        out = {}
+        for body in self.batches(sorted(keys)):
+            out.update(self._quote(body))
+        return out
+
+    def cycle(self):
+        """One pass over every subscribed key. Returns number of instruments received."""
+        with self._lock:
+            keys = list(self.keys)
+        t0, got = time.monotonic(), 0
+        for body in self.batches(keys):
+            if self.fatal or not self.is_active():
+                break
+            try:
+                q = self._quote(body)
+            except Exception as e:
+                self.stats["errors"] += 1
+                self.stats["last_error"] = f"{type(e).__name__}: {e}"[:200]
+                continue
+            now = time.time()
+            got += len(q)
+            if self.on_data:
+                for k, f in q.items():
+                    self.on_data(k, f, now)
+        self.stats["cycles"] += 1
+        self.stats["instruments"] = got
+        self.stats["last_cycle_sec"] = round(time.monotonic() - t0, 1)
+        return got
+
+    def _loop_forever(self):
+        while True:
+            if self.fatal:
+                self.state = "stopped"
+                time.sleep(10)
+                continue
+            if not self.keys or not self.is_active():
+                self.state = "idle"
+                time.sleep(3)
+                continue
+            self.state = "polling"
+            self.cycle()
+            self._status()
 
 
 # ======================================================================

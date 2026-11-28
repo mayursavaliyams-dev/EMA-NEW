@@ -31,7 +31,7 @@ from collections import deque, defaultdict
 from datetime import datetime, timezone, timedelta
 
 import config
-from trackers.providers import DhanProvider, UpstoxProvider
+from trackers.providers import DhanProvider, DhanRestProvider, UpstoxProvider
 from trackers.history import History, label as bu_label, LABELS
 from trackers.nse_context import NseContext
 from trackers.nse_extra import NseExtra
@@ -46,9 +46,12 @@ HARD_CAP = 25000
 
 SETTINGS = {
     "TRACKER_ENABLED": True,
-    "trkProvider": "auto",      # auto | dhan | upstox   (auto = Dhan if dhan.json works, else Upstox)
+    "trkProvider": "auto",      # auto | dhan_rest | dhan | upstox
+                                # auto = dhan_rest (REST, 0 WebSocket) if dhan.json works, else Upstox.
+                                # "dhan" (5 WebSockets) only on request: it would disconnect a bot on the same Dhan id.
     "trkBudget": 25000,         # strikes to track (Dhan: all live; Upstox: 5000 live + rest via REST)
     "trkDhanConnections": 5,    # Dhan allows 5 WS connections x 5000 instruments
+    "trkDhanRestPerSec": 0.8,   # dhan_rest: market-quote calls/sec (Dhan cap 1/sec per account; 1000 instruments each)
     "trkSpikePct": 20,          # premium move % ...
     "trkWindowMin": 5,          # ... within this many minutes
     "trkMinPremium": 2,         # ignore options cheaper than ₹ (noise)
@@ -432,6 +435,7 @@ class StockOptionsTracker:
         self.det = detector or Detector()
         self.trend = TrendEngine(self.det.get)
         self.providers = providers or {"dhan": DhanProvider(setting("trkDhanConnections")),
+                                       "dhan_rest": DhanRestProvider(setting("trkDhanRestPerSec")),
                                        "upstox": UpstoxProvider(conn)}
         self.hist = history if history is not None else History(days=setting("trkHistDays"))
         self.ctx = context if context is not None else NseContext()
@@ -544,13 +548,17 @@ class StockOptionsTracker:
 
     def choose_provider(self):
         want = str(setting("trkProvider")).lower()
-        d, u = self.providers.get("dhan"), self.providers.get("upstox")
-        if want == "upstox" or not d:
-            p = u
-        elif want == "dhan" or d.available():
-            p = d if d.available() or want == "dhan" else u
+        d, dr, u = self.providers.get("dhan"), self.providers.get("dhan_rest"), self.providers.get("upstox")
+        if want == "dhan" and d:
+            p = d                         # explicit: 5 WebSockets (would bump a bot on the same Dhan id)
+        elif want in ("auto", "dhan_rest") and dr and dr.available():
+            p = dr                        # REST only, 0 WebSocket connections
+        elif want == "auto" and not dr and d and d.available():
+            p = d                         # (custom provider sets without dhan_rest)
         else:
-            p = u
+            p = u or dr or d
+        if hasattr(p, "is_active"):
+            p.is_active = self.active
         if p is not self.p:
             if self.p is not None:
                 self.p.set_subscription(set())
@@ -582,6 +590,12 @@ class StockOptionsTracker:
         if now - self._t_rebal > setting("trkRebalanceMin") * 60 or not self.sel:
             self._t_rebal = now
             self.rebalance()
+        if self.p.name == "dhan_rest":
+            ps = self.p.stats
+            self.stats["rest_every_sec"] = ps["last_cycle_sec"]
+            self.stats["rest_polls"] = ps["cycles"]
+            if ps.get("last_error"):
+                self.stats["errors"]["dhan_rest"] = ps["last_error"]
         if self.p.name == "upstox":
             calls = max(1, -(-len(self.sel) // 500))
             every = max(float(setting("trkQuotePollSec")), calls * 60 / 40.0)   # <= 40 calls/min (Upstox: 2000/30min, shared)
@@ -1544,7 +1558,9 @@ class StockOptionsTracker:
         return {"enabled": bool(setting("TRACKER_ENABLED")), "active": self.active(),
                 "provider": p.name if p else None, "live_limit": p.limit if p else None,
                 "dhan_available": self.providers["dhan"].available() if "dhan" in self.providers else False,
-                "dhan_error": getattr(self.providers.get("dhan"), "fatal", None),
+                "dhan_error": getattr(self.providers.get("dhan"), "fatal", None)
+                or getattr(self.providers.get("dhan_rest"), "fatal", None),
+                "dhan_rest": dict(self.providers["dhan_rest"].stats) if "dhan_rest" in self.providers else None,
                 "stocks_in_master": len(self.u.stocks), "stocks_tracked": len(per),
                 "instruments_tracked": n, "instruments_live": nl, "underlyings_live": len(self.ukeys),
                 "futures_live": len(self.fut_meta),

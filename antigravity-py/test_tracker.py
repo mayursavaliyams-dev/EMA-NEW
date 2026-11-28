@@ -401,6 +401,144 @@ def test_dhan_websocket_roundtrip():
     check("live unsubscribe (RequestCode 22)", sum(s["InstrumentCount"] for s in unsub) == 10)
 
 
+# ---------------------------------------------------------------------------
+DOC_QUOTE = {"data": {"NSE_FNO": {"58992": {
+    "average_price": 13.03, "buy_quantity": 41250000, "sell_quantity": 38760000, "last_price": 13.05,
+    "last_quantity": 500, "last_trade_time": "13/11/2026 15:29:59", "lower_circuit_limit": 11.75,
+    "upper_circuit_limit": 14.34, "net_change": 0.09, "volume": 312450000, "oi": 98456250,
+    "ohlc": {"open": 12.96, "high": 13.13, "low": 12.92, "close": 12.96},
+    "depth": {"buy": [{"quantity": 125000, "price": 13.04, "orders": 42}, {"quantity": 310000, "price": 13.03, "orders": 88}],
+              "sell": [{"quantity": 98000, "price": 13.05, "orders": 31}, {"quantity": 260000, "price": 13.06, "orders": 74}]}}},
+    "NSE_EQ": {"14366": {"last_price": 806.5, "average_price": 805.0, "volume": 10, "oi": 0,
+                         "ohlc": {"open": 800, "high": 810, "low": 799, "close": 801}}}}, "status": "success"}
+
+
+class _FakeDhanHttp:
+    """Local HTTP server speaking Dhan's POST /marketfeed/quote. `script` = list of status codes to
+    return first (e.g. [429] = one rate-limit reply), then 200 with a quote for every requested id."""
+    def __init__(self, script=()):
+        import http.server
+        self.script, self.calls, self.headers = list(script), [], []
+        box = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                box.calls.append((self.path, body))
+                box.headers.append({k.lower(): v for k, v in self.headers.items()})
+                code = box.script.pop(0) if box.script else 200
+                if code == 200:
+                    data = {seg: {str(i): {"last_price": 10.0 + i % 7, "average_price": 10.0, "volume": 100 + i,
+                                           "oi": 1000 + i, "ohlc": {"open": 9.0, "high": 11.0, "low": 8.0, "close": 9.5}}
+                                  for i in ids} for seg, ids in body.items()}
+                    out = json.dumps({"data": data, "status": "success"})
+                elif code == 429:
+                    out = json.dumps({"status": "failure", "errorType": "RATE_LIMIT_ERROR", "errorCode": "RL001",
+                                      "errorMessage": "Too many requests. Please retry after 1 second."})
+                else:
+                    out = json.dumps({"errorType": "Invalid_Authentication", "errorCode": "DH-901",
+                                      "errorMessage": "Client ID or user generated access token is invalid or expired."})
+                raw = out.encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def test_dhan_rest():
+    """dhan_rest: all instruments over REST full quotes, 0 WebSocket, paced, 429 retry, auth fallback."""
+    R = P.DhanRestProvider
+    keys = [f"NSE_FNO|{i}" for i in range(1, 2401)] + [f"NSE_EQ|{i}" for i in range(5001, 5101)]
+    b = R.batches(keys)
+    check("dhan_rest: 2,500 keys -> 3 requests of <= 1,000 instruments, segments kept",
+          len(b) == 3 and all(sum(len(v) for v in x.values()) <= 1000 for x in b)
+          and sum(len(v) for x in b for v in x.values()) == 2500 and set(b[-1]) == {"NSE_FNO", "NSE_EQ"})
+    q = R.parse_quote(DOC_QUOTE)
+    f = q["NSE_FNO|58992"]
+    check("dhan_rest: Dhan doc full-quote fields -> tracker fields",
+          f["ltp"] == 13.05 and f["vwap"] == 13.03 and f["oi"] == 98456250 and f["volume"] == 312450000
+          and f["prev_close"] == 12.96 and f["open"] == 12.96 and f["high"] == 13.13 and f["low"] == 12.92
+          and f["tbq"] == 41250000 and f["tsq"] == 38760000 and f["ltq"] == 500
+          and f["bid"] == 13.04 and f["ask"] == 13.05 and f["bid_qty"] == 125000 and f["ask_qty"] == 98000
+          and f["depth_bid_qty"] == 435000 and f["depth_ask_qty"] == 358000
+          and datetime.fromtimestamp(f["ltt"], IST).strftime("%d/%m/%Y %H:%M:%S") == "13/11/2026 15:29:59")
+    check("dhan_rest: equity quote without depth parsed", q["NSE_EQ|14366"]["ltp"] == 806.5 and "bid" not in q["NSE_EQ|14366"])
+
+    srv = _FakeDhanHttp(script=[429])
+    try:
+        d = R(per_sec=20, creds={"client_id": "1100", "access_token": "tok"}, api=srv.url)
+        got = {}
+        d.on_data = lambda k, fl, ts: got.__setitem__(k, fl)
+        d.set_subscription(keys)
+        t0 = time.monotonic()
+        n = d.cycle()
+        dt = time.monotonic() - t0
+        check("dhan_rest: one cycle delivers every instrument via on_data",
+              n == 2500 and len(got) == 2500 and got["NSE_FNO|7"]["oi"] == 1007 and got["NSE_EQ|5001"]["prev_close"] == 9.5)
+        check("dhan_rest: POST /marketfeed/quote with access-token + client-id headers",
+              all(c[0] == "/marketfeed/quote" for c in srv.calls)
+              and all(h.get("access-token") == "tok" and h.get("client-id") == "1100" for h in srv.headers))
+        check("dhan_rest: rate-limit reply (429 RL001) retried, nothing lost",
+              d.stats["rate_limited"] == 1 and len(srv.calls) == 4 and not d.fatal)
+        check("dhan_rest: calls paced (4 calls at 20/s >= 0.15 s)", dt >= 0.15, f"({dt:.2f} s)")
+        check("dhan_rest: status says 0 WebSocket", "0 WebSocket" in d.status_text() and d.limit >= T.HARD_CAP)
+    finally:
+        srv.close()
+
+    # default pace stays under Dhan's 1 quote call/sec per account
+    check("dhan_rest: default pace 0.8 calls/s (< Dhan 1/s), full refresh of 25,654 in ~33 s",
+          R().per_sec == 0.8 and abs(len(R.batches([f"NSE_FNO|{i}" for i in range(25654)])) / 0.8 - 32.5) < 0.1)
+
+    srv = _FakeDhanHttp(script=[401])
+    try:
+        d = R(per_sec=20, creds={"client_id": "1100", "access_token": "bad"}, api=srv.url)
+        d.set_subscription(keys[:10])
+        d.cycle()
+        check("dhan_rest: expired token -> provider stops (fatal), not available", bool(d.fatal) and not d.available())
+        up = FakeProvider()
+        t = T.StockOptionsTracker(None, FakeNews(), detector=T.Detector(get=lambda k: SET[k]),
+                                  providers={"dhan_rest": d, "upstox": up}, history=False, context=False, extra=False)
+        check("dhan_rest: tracker falls back to Upstox when Dhan REST fails", t.choose_provider() is up)
+    finally:
+        srv.close()
+
+    # tracker picks dhan_rest on auto and puts all 25,000 strikes + stocks + futures on it
+    srv = _FakeDhanHttp()
+    try:
+        d = R(per_sec=50, creds={"client_id": "1100", "access_token": "tok"}, api=srv.url)
+        fp = FakeProvider()
+        d.load_rows, d.load_futures, d.spots = fp.load_rows, fp.load_futures, fp.spots
+        dws = P.DhanProvider(creds={"client_id": "1100", "access_token": "tok"})
+        dws.start_feed = lambda on_data, on_status: None      # offline test: never open a real socket
+        t = T.StockOptionsTracker(None, FakeNews(), detector=T.Detector(get=lambda k: SET[k]),
+                                  providers={"dhan": dws, "dhan_rest": d, "upstox": FakeProvider()},
+                                  history=False, context=False, extra=False)
+        check("dhan_rest: auto prefers dhan_rest over Dhan WebSocket (protects the bot's 5 sockets)",
+              SET["trkProvider"] == "auto" and t.choose_provider() is d and "dhan" not in t._feeds_started)
+        t.u.build(d.load_rows())
+        t.u.build_futures(d.load_futures())
+        t.rebalance()
+        check("dhan_rest: 25,000 strikes + 218 stocks + 436 futures all on REST",
+              len(t.sel) == 25000 and len(d.keys) == 25000 + 218 + 436 and t.live_keys == set(t.sel)
+              and all(s == "idle" for s in dws.conn_state), f"({len(d.keys)})")
+        SET["trkProvider"] = "dhan"
+        check("dhan_rest: Dhan WebSocket only when asked explicitly", t.choose_provider() is dws)
+    finally:
+        SET["trkProvider"] = "auto"
+        srv.close()
+
+
 def test_news_relevance():
     from trackers.news import is_relevant, clean_name
     check("clean_name drops LIMITED", clean_name("RELIANCE INDUSTRIES LIMITED") == "Reliance Industries")
@@ -759,7 +897,7 @@ def test_board_fast_topn():
 if __name__ == "__main__":
     for fn in [test_25000_allocation, test_recentre_and_new_strikes, test_detector, test_volume_burst,
                test_alerts_news_match, test_rest_merge_summary_ladder, test_vwap, test_dhan_packets,
-               test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_news_relevance,
+               test_dhan_split, test_dhan_master_csv, test_dhan_websocket_roundtrip, test_dhan_rest, test_news_relevance,
                test_history, test_history_in_tracker, test_trend, test_trend_saved_and_alerted,
                test_iv_greeks_and_spike, test_depth_and_context, test_stock_signals, test_futures, test_analytics, test_nse_extra_and_alerts, test_export_api, test_board_fast_topn, test_speed]:
         print(fn.__name__)
