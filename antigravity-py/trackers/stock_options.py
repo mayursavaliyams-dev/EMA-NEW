@@ -47,7 +47,7 @@ HARD_CAP = 25000
 SETTINGS = {
     "TRACKER_ENABLED": True,
     "trkProvider": "auto",      # auto | dhan_rest | dhan | upstox
-                                # auto = dhan_rest (REST, 0 WebSocket) if dhan.json works, else Upstox.
+                                # auto = dhan_rest (REST, 0 WebSocket) if dhan.json works (never env vars alone), else Upstox.
                                 # "dhan" (5 WebSockets) only on request: it would disconnect a bot on the same Dhan id.
     "trkBudget": 25000,         # strikes to track (Dhan: all live; Upstox: 5000 live + rest via REST)
     "trkDhanConnections": 5,    # Dhan allows 5 WS connections x 5000 instruments
@@ -549,11 +549,16 @@ class StockOptionsTracker:
     def choose_provider(self):
         want = str(setting("trkProvider")).lower()
         d, dr, u = self.providers.get("dhan"), self.providers.get("dhan_rest"), self.providers.get("upstox")
-        if want == "dhan" and d:
+        auto_ok = lambda x: x.auto_ok() if hasattr(x, "auto_ok") else x.available()
+        if want == "upstox" and u:
+            p = u
+        elif want == "dhan" and d:
             p = d                         # explicit: 5 WebSockets (would bump a bot on the same Dhan id)
-        elif want in ("auto", "dhan_rest") and dr and dr.available():
-            p = dr                        # REST only, 0 WebSocket connections
-        elif want == "auto" and not dr and d and d.available():
+        elif want == "dhan_rest" and dr and dr.available():
+            p = dr                        # explicit REST (env vars allowed)
+        elif want == "auto" and dr and auto_ok(dr):
+            p = dr                        # REST only, 0 WebSocket; auto only with dhan.json, never env vars alone
+        elif want == "auto" and not dr and d and auto_ok(d):
             p = d                         # (custom provider sets without dhan_rest)
         else:
             p = u or dr or d
