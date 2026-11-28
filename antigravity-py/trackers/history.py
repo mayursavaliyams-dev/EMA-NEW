@@ -122,7 +122,7 @@ class History:
 
     # ---------------- build ----------------
     STATE = "_state.pkl"
-    STATE_VER = 2
+    STATE_VER = 3          # 3: a re-issued NSE token starts a new contract record (rebuild once)
 
     def load(self, today=None):
         """Incremental: the built state is pickled; only bhavcopy days not yet processed are parsed.
@@ -196,6 +196,13 @@ class History:
                 hi, lo, cl, pv = _f(x[6]), _f(x[7]), _f(x[8]), _f(x[9])
                 oi, choi, vol = int(_f(x[10])), int(_f(x[11])), int(_f(x[12]))
                 c = contracts.get(tok)
+                # NSE re-issues the token of an expired contract to a new one (e.g. 117144: IREDA Aug
+                # 122.5 CE, later HDFCBANK Dec 860 CE; ~18,000 of 76,000 tokens over 100 days). A token
+                # whose contract changed starts a fresh record, else the new contract's history is
+                # mixed into the old one and dropped with it when the old expiry passes.
+                if c is not None and (c["sym"] != sym or c["exp"] != exp or c["opt"] != opt
+                                      or c["strike"] != _f(x[3])):
+                    c = None
                 if c is None:
                     c = contracts[tok] = {"sym": sym, "exp": exp, "strike": _f(x[3]), "opt": opt,
                                           "listed": date, "ath": None, "ath_d": None, "atl": None, "atl_d": None,

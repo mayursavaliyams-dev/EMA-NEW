@@ -530,6 +530,37 @@ def test_dhan_rest():
     finally:
         srv.close()
 
+    # trkAlwaysOn switched off mid-pass (seen on DP545): the cut-short pass is not counted as a
+    # "full refresh", and status() says paused at once instead of a stale "polling" text
+    srv = _FakeDhanHttp()
+    try:
+        d = R(per_sec=50, creds={"client_id": "1100", "access_token": "tok"}, api=srv.url)
+        d.set_subscription(keys)
+        d.cycle()
+        full = dict(d.stats)
+        calls = {"n": 0}
+        def flip():
+            calls["n"] += 1
+            return calls["n"] <= 1          # active for the first batch only
+        d.is_active = flip
+        n = d.cycle()
+        check("dhan_rest: pass cut short by pause -> not counted as a full refresh",
+              n == 1000 and d.stats["cycles"] == full["cycles"] and d.stats["last_cycle_sec"] == full["last_cycle_sec"]
+              and d.stats["instruments"] == 2500 and d.state == "idle", f"({n}, {d.stats})")
+        t = T.StockOptionsTracker(None, FakeNews(), detector=T.Detector(get=lambda k: SET[k]),
+                                  providers={"dhan_rest": d}, history=False, context=False, extra=False)
+        t.stats["feed"] = d.status_text()
+        old_mw, SET["trkAlwaysOn"] = T.market_window, False
+        T.market_window = lambda n=None: False
+        try:
+            st = t.status()
+            check("dhan_rest: status() shows paused right after trkAlwaysOn is turned off",
+                  st["active"] is False and st["feed"].startswith("paused"), f"({st['feed']})")
+        finally:
+            T.market_window, SET["trkAlwaysOn"] = old_mw, True
+    finally:
+        srv.close()
+
     # tracker picks dhan_rest on auto and puts all 25,000 strikes + stocks + futures on it
     srv = _FakeDhanHttp()
     try:
@@ -626,6 +657,19 @@ def test_history():
           row["fut_streak"] == 6 and row["fut_run"] == "LB" and row["fut_run_days"] == 6 and row["fut_basis_pct"] is not None)
     sb = h.strike_build("ABC", 5)
     check("strikes where OI was built over 5 days", sb[0]["oi_chg"] == 2500 and sb[0]["opt"] == "CE")
+
+    # NSE re-issues an expired contract's token (seen on DP545: 117144 = IREDA Aug CE, then
+    # HDFCBANK Dec 860 CE; 14,811 live contracts lost their history)
+    old_exp = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+    rd = [(ds[0], [("555", "OLDCO", old_exp, 120, "CE", 50, 40, 45, 44, 9999, 0, 10, 120)]),
+          (ds[1], [("555", "OLDCO", old_exp, 120, "CE", 60, 41, 46, 45, 9999, 0, 10, 120)])] + \
+         [(d, [("555", "NEWCO", exp, 860, "CE", 30 + i, 24, 25 + i, 25, 6000 + i * 100, 100, 20, 857)])
+          for i, d in enumerate(ds[2:])]
+    h2 = History(days=30, cache=fake_hist(rd), fetch=False).load(today)
+    c2 = h2.contract("555")
+    check("history: re-issued NSE token -> new contract keeps its own ATH / listing / prev OI",
+          c2 is not None and c2["listed"] == ds[2] and c2["ath"] == 33 and c2["atl"] == 24
+          and c2["prev_oi"] == 6300, f"({c2 and {k: c2[k] for k in ('listed', 'ath', 'atl', 'prev_oi')}})")
     return h
 
 

@@ -1555,7 +1555,10 @@ class StockOptionsTracker:
                 per[m["symbol"]] += 1
         p = self.p
         today = now_ist().strftime("%Y-%m-%d")
-        return {"enabled": bool(setting("TRACKER_ENABLED")), "active": self.active(),
+        active = self.active()
+        if not active:   # the main loop may be mid-tick; never show a stale "polling" feed while paused
+            self.stats["feed"] = "paused (outside market hours)" if setting("TRACKER_ENABLED") else "disabled"
+        return {"enabled": bool(setting("TRACKER_ENABLED")), "active": active,
                 "provider": p.name if p else None, "live_limit": p.limit if p else None,
                 "dhan_available": self.providers["dhan"].available() if "dhan" in self.providers else False,
                 "dhan_error": getattr(self.providers.get("dhan"), "fatal", None)

@@ -604,7 +604,10 @@ class DhanRestProvider(DhanProvider):
         t0, got = time.monotonic(), 0
         for body in self.batches(keys):
             if self.fatal or not self.is_active():
-                break
+                # cut short (market closed / trkAlwaysOn off / auth stop): not a full refresh,
+                # so leave cycles / instruments / last_cycle_sec showing the last complete pass
+                self.state = "idle" if not self.fatal else "stopped"
+                return got
             try:
                 q = self._quote(body)
             except Exception as e:
@@ -633,7 +636,8 @@ class DhanRestProvider(DhanProvider):
                 continue
             self.state = "polling"
             self.cycle()
-            self._status()
+            if self.is_active() or self.fatal:
+                self._status()     # after a cut-short pass the tracker shows "paused" instead
 
 
 # ======================================================================
