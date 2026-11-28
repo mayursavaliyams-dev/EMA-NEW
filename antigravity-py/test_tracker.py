@@ -510,6 +510,23 @@ def test_dhan_rest():
         t = T.StockOptionsTracker(None, FakeNews(), detector=T.Detector(get=lambda k: SET[k]),
                                   providers={"dhan_rest": d, "upstox": up}, history=False, context=False, extra=False)
         check("dhan_rest: tracker falls back to Upstox when Dhan REST fails", t.choose_provider() is up)
+        cred = os.path.join(TMP, "dhan.json")
+        with open(cred, "w", encoding="utf-8") as fh:
+            json.dump({"client_id": "1100", "access_token": "old"}, fh)
+        old_path, P.DHAN_CRED_PATH = P.DHAN_CRED_PATH, cred
+        try:
+            d2 = R(per_sec=20, api=srv.url)
+            srv.script = [401]
+            d2.set_subscription(keys[:10])
+            d2.cycle()
+            stopped = bool(d2.fatal) and not d2.available()
+            with open(cred, "w", encoding="utf-8") as fh:
+                json.dump({"client_id": "1100", "access_token": "new"}, fh)
+            os.utime(cred, (time.time() + 5, time.time() + 5))
+            check("dhan_rest: new token in dhan.json clears the auth stop without a restart",
+                  stopped and d2.available() and not d2.fatal and d2.cycle() == 10)
+        finally:
+            P.DHAN_CRED_PATH = old_path
     finally:
         srv.close()
 

@@ -467,6 +467,20 @@ class DhanRestProvider(DhanProvider):
                       "rate_limited": 0, "errors": 0, "last_error": None}
         self.state = "idle"
         self._started = False
+        self._fatal_mtime = None              # dhan.json mtime when we stopped on an auth error
+
+    def _cred_mtime(self):
+        try:
+            return os.path.getmtime(DHAN_CRED_PATH)
+        except OSError:
+            return None
+
+    def available(self):
+        """A fresh dhan.json (new token, e.g. the 09:00 refresh) clears an auth stop — no restart."""
+        if self.fatal and self._creds is None and self._cred_mtime() != self._fatal_mtime:
+            self.fatal = None
+            self.stats["last_error"] = "auth error cleared: dhan.json updated"
+        return super().available()
 
     # ---- subscription = "the set of keys to poll" ----
     def set_subscription(self, keys):
@@ -570,6 +584,7 @@ class DhanRestProvider(DhanProvider):
                 continue
             if r.status_code in (401, 403) or any(c in txt for c in self.AUTH_FAIL):
                 self.fatal = f"Dhan REST auth/plan error HTTP {r.status_code}: {txt[:120]}"
+                self._fatal_mtime = self._cred_mtime()
                 self._status()
                 return {}
             raise RuntimeError(f"Dhan {self.QUOTE_PATH} HTTP {r.status_code}: {txt[:160]}")
@@ -608,7 +623,7 @@ class DhanRestProvider(DhanProvider):
 
     def _loop_forever(self):
         while True:
-            if self.fatal:
+            if self.fatal and not self.available():
                 self.state = "stopped"
                 time.sleep(10)
                 continue
