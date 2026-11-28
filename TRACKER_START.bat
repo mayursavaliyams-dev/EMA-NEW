@@ -2,7 +2,8 @@
 rem ============================================================
 rem  Stock Options + News tracker - ek click thi chalu karo.
 rem  DISPLAY ONLY: koi order mukto nathi (paper mode).
-rem  Data: fakt Dhan (5 connections).
+rem  Data: Dhan REST (dhan_rest) - 0 WebSocket, etle bot na 5 Dhan
+rem  connections ne koi asar nathi (6th connection = error 805).
 rem ============================================================
 setlocal
 chcp 65001 >nul
@@ -49,11 +50,11 @@ if not exist "dhan.json" (
   if errorlevel 1 ( pause & exit /b 1 )
 )
 
-rem --- safety settings: paper only, Dhan only, 5 connections ---
+rem --- safety settings: paper only, Dhan REST only (0 WebSocket) ---
 set "DHAN_CLIENT_ID="
 set "DHAN_ACCESS_TOKEN="
 set "PYTHONIOENCODING=utf-8"
-".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan', 'trkDhanConnections': 5})"
+".venv\Scripts\python.exe" -c "import config; config.save_overrides({'TRADE_MODE': 'paper', 'trkProvider': 'dhan_rest'})"
 
 echo.
 echo  ==========================================================
