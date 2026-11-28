@@ -109,6 +109,13 @@ never feeds the strangle engine.
   - **Upstox** (backup): WebSocket ticks for the 5,000 strikes nearest ATM + REST full quotes for
     all 25,000 (OI, OI hi/lo, VWAP, OHLC, volume), paced to <= 40 calls/min. Upstox gives no
     previous-day OI, so "OI chg" is blank on Upstox.
+- **Dhan Pro** (`trackers/dhan_pro.py`, needs the ₹999 Data APIs Pro plan + `dhan.json`; setting
+  `trkProEnabled`): news with sentiment every `trkProNewsSec` (60 s, merged into the alert news
+  so each alert shows 🟢/🔴), 9 market-mover lists every `trkProMoversSec` (120 s: options/futures
+  highest OI, OI gainers/losers, top volume; F&O stock price gainers/losers), and RSI/ADX/EMA20/
+  EMA50/ATR/MACD for every F&O stock every `trkProTechMin` (5 min, `trkProTechTf` candle) with an
+  UP/DOWN/SIDE trend label. Alerts get a "✓ with trend / ✗ vs trend" badge. <= 2 req/s on the
+  Data-API budget; a plan error (DH-902) pauses that feature for 30 min. API: `GET /api/tracker/pro`.
 - **Universe:** all 218 F&O stocks, front expiry first (Dhan lists ~27k front-expiry legs, Upstox
   ~12.6k — the rest then comes from the next/far expiry), strikes nearest spot, water-filled.
   Re-centred every 3 min (subscription diffed); masters re-downloaded conditionally; Upstox also
@@ -153,7 +160,7 @@ never feeds the strangle engine.
   HIGH break, TREND start/end, FUT_BUILDUP, BASIS flip, OI wall shift, PCR shift, ATM straddle expansion, stock opening-range
   breakout, F&O BAN / MWPL. Each is matched to NSE filings + Google News (NEWS-MATCH / UNEXPLAINED /
   NEWS-AFTER) in background threads. All thresholds are in the tab's Settings.
-- **Test:** `py test_tracker.py` (offline, 122 checks incl. a WebSocket round-trip with a fake Dhan
+- **Test:** `py test_tracker.py` (offline, 134 checks incl. a WebSocket round-trip with a fake Dhan
   feed, history/ATH/trend/IV/context checks and a 25k-strike throughput check).
 - Uses its own WebSocket connection(s): Upstox — 1 (the EMA bot uses another); Dhan — up to 5.
 
